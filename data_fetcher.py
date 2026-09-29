@@ -20,15 +20,25 @@ from typing import List, Optional
 API_KEY = os.environ.get("FOOTBALL_DATA_API_KEY", "")
 BASE_URL = "https://api.football-data.org/v4"
 
-# football-data.org competition codes for the top 5 leagues
+# football-data.org competition codes. All ten of these are on the free tier.
 LEAGUES = {
     "Premier League": "PL",
     "La Liga": "PD",
     "Serie A": "SA",
     "Bundesliga": "BL1",
     "Ligue 1": "FL1",
-    "Champions League": "CL"
+    "Champions League": "CL",
+    "Eredivisie": "DED",
+    "Championship": "ELC",       # English second tier
+    "Brazil Serie A": "BSA",
+    "Liga Portugal": "PPL",
 }
+
+# Champions League is a special case for the model: early in the season there
+# aren't 20 played group-stage matches yet, so DixonColesModel.fit() will
+# raise until enough fixtures have been played. That's expected, not a bug —
+# api_server.py already catches this per-league and just leaves it out of
+# the cache until there's enough data.
 
 
 @dataclass

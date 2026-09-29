@@ -21,13 +21,24 @@ from typing import List, Optional
 ODDS_API_KEY = os.environ.get("ODDS_API_KEY", "")
 ODDS_BASE_URL = "https://api.the-odds-api.com/v4"
 
-# The Odds API sport keys for the top 5 leagues
+# The Odds API sport keys. The first five are well-established and stable.
+# The last five are best-effort — The Odds API doesn't cover every league on
+# every plan, and exact key strings do shift over time. Before relying on
+# these, GET https://api.the-odds-api.com/v4/sports?apiKey=YOUR_KEY once and
+# check the returned list — it costs nothing against your quota (this specific
+# endpoint isn't counted the same as an odds request) and shows you the exact
+# keys and whether each league is actually active on your plan right now.
 ODDS_SPORT_KEYS = {
     "Premier League": "soccer_epl",
     "La Liga": "soccer_spain_la_liga",
     "Serie A": "soccer_italy_serie_a",
     "Bundesliga": "soccer_germany_bundesliga1",
     "Ligue 1": "soccer_france_ligue_one",
+    "Champions League": "soccer_uefa_champs_league",
+    "Eredivisie": "soccer_netherlands_eredivisie",
+    "Championship": "soccer_efl_champ",
+    "Brazil Serie A": "soccer_brazil_campeonato",
+    "Liga Portugal": "soccer_portugal_primeira_liga",
 }
 
 
