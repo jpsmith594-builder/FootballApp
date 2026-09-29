@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Matchday — Live Predictions</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Oswald:wght@500;600;700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root{ --pitch:#0E3B2E; --chalk:#F3F1EA; --ink:#0B1A15; --amber:#E8A23D; --line:rgba(243,241,234,0.14); --muted:#9FB3AA; }
+  *{box-sizing:border-box;}
+  body{ margin:0; background:var(--ink); color:var(--chalk); font-family:'Inter',sans-serif; }
+  h1,.tab,.score{font-family:'Oswald',sans-serif;}
+  header{ padding:1.6rem 1.2rem 1rem; background:linear-gradient(180deg,var(--pitch),var(--ink)); border-bottom:1px solid var(--line); }
+  h1{font-size:1.5rem; margin:0 0 .2rem;}
+  #config{ padding:.8rem 1.2rem; font-size:.8rem; color:var(--muted); }
+  #config input{ background:transparent; border:1px solid var(--line); color:var(--chalk); padding:.4rem .6rem; border-radius:6px; width:100%; max-width:420px; }
+  .tabs{display:flex; gap:.4rem; overflow-x:auto; padding:0 1.2rem 1rem;}
+  .tab{ padding:.5rem 1rem; border-radius:999px; border:1px solid var(--line); background:transparent; color:var(--muted); cursor:pointer; white-space:nowrap; font-size:.82rem; }
+  .tab.active{ background:var(--amber); color:var(--ink); border-color:var(--amber); }
+  main{max-width:640px; margin:0 auto; padding:0 1.2rem 3rem;}
+  .fixture{ background:rgba(243,241,234,0.04); border:1px solid var(--line); border-radius:14px; padding:1rem 1.1rem; margin-bottom:.9rem; }
+  .teams{display:flex; align-items:center; justify-content:space-between; gap:.6rem;}
+  .team{flex:1; font-weight:600;}
+  .team.away{text-align:right;}
+  .score{font-size:1.4rem; color:var(--amber); padding:0 .6rem;}
+  .probs{display:flex; height:8px; border-radius:999px; overflow:hidden; margin-top:.8rem;}
+  .probs .home{background:var(--amber);} .probs .draw{background:var(--muted);} .probs .away{background:#155A44;}
+  .value-bet{ margin-top:.6rem; padding:.5rem .7rem; background:rgba(232,162,61,0.15); border:1px solid var(--amber); border-radius:8px; font-size:.8rem; }
+  .status{padding:2rem; text-align:center; color:var(--muted);}
+</style>
+</head>
+<body>
+<header><h1>Matchday</h1><p style="margin:0;color:var(--muted);font-size:.85rem;">Live predictions from your model</p></header>
+<div id="config">
+  API base URL: <input id="apiBase" placeholder="https://your-app.onrender.com" />
+</div>
+<div class="tabs" id="tabs"></div>
+<main id="content"><div class="status">Enter your API URL above to load live predictions.</div></main>
+
+<script>
+const leagues = ["Premier League","La Liga","Serie A","Bundesliga","Ligue 1"];
+let active = leagues[0];
+const tabsEl = document.getElementById('tabs');
+const contentEl = document.getElementById('content');
+const apiInput = document.getElementById('apiBase');
+
+// Remembers your API URL in this browser only — not sent anywhere else.
+apiInput.value = localStorage.getItem('matchday_api_base') || '';
+apiInput.addEventListener('change', () => {
+  localStorage.setItem('matchday_api_base', apiInput.value.trim());
+  loadLeague(active);
+});
+
+function renderTabs(){
+  tabsEl.innerHTML = '';
+  leagues.forEach(name => {
+    const b = document.createElement('button');
+    b.className = 'tab' + (name === active ? ' active' : '');
+    b.textContent = name;
+    b.onclick = () => { active = name; renderTabs(); loadLeague(name); };
+    tabsEl.appendChild(b);
+  });
+}
+
+async function loadLeague(name){
+  const base = apiInput.value.trim().replace(/\/$/, '');
+  if(!base){ contentEl.innerHTML = '<div class="status">Enter your API URL above to load live predictions.</div>'; return; }
+  contentEl.innerHTML = '<div class="status">Loading...</div>';
+  try{
+    const res = await fetch(`${base}/predictions/${encodeURIComponent(name)}`);
+    if(!res.ok) throw new Error(`API returned ${res.status}`);
+    const data = await res.json();
+    renderFixtures(data.predictions);
+  }catch(err){
+    contentEl.innerHTML = `<div class="status">Couldn't load predictions: ${err.message}<br>Check the API URL and that your backend is deployed and awake.</div>`;
+  }
+}
+
+function renderFixtures(predictions){
+  if(!predictions || predictions.length === 0){
+    contentEl.innerHTML = '<div class="status">No upcoming fixtures in the next 10 days for this league.</div>';
+    return;
+  }
+  contentEl.innerHTML = predictions.map(p => `
+    <div class="fixture">
+      <div class="teams">
+        <div class="team">${p.home}</div>
+        <div class="score">${p.predicted_score[0]} – ${p.predicted_score[1]}</div>
+        <div class="team away">${p.away}</div>
+      </div>
+      <div class="probs">
+        <div class="home" style="width:${(p.home_win*100).toFixed(1)}%"></div>
+        <div class="draw" style="width:${(p.draw*100).toFixed(1)}%"></div>
+        <div class="away" style="width:${(p.away_win*100).toFixed(1)}%"></div>
+      </div>
+      ${(p.value_bets||[]).map(b => `<div class="value-bet">Value bet: ${b.market} @ ${b.odds} (edge ${(b.edge*100).toFixed(1)}%)</div>`).join('')}
+    </div>
+  `).join('');
+}
+
+renderTabs();
+if(apiInput.value) loadLeague(active);
+</script>
+</body>
+</html>
