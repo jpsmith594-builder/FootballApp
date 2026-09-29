@@ -51,11 +51,14 @@ class FootballDataClient:
         self.session.headers.update({"X-Auth-Token": api_key})
 
     def _get(self, path: str, params: dict = None) -> dict:
-        resp = self.session.get(f"{BASE_URL}{path}", params=params or {})
+        # timeout=15 is essential here: without it, a slow or unreachable API
+        # can hang a request forever, which on Render can stall the whole
+        # startup sequence and trigger a "no open ports detected" failure.
+        resp = self.session.get(f"{BASE_URL}{path}", params=params or {}, timeout=15)
         if resp.status_code == 429:
             # Free tier rate limit — back off and retry once.
             time.sleep(6)
-            resp = self.session.get(f"{BASE_URL}{path}", params=params or {})
+            resp = self.session.get(f"{BASE_URL}{path}", params=params or {}, timeout=15)
         resp.raise_for_status()
         return resp.json()
 

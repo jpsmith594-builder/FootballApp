@@ -48,6 +48,7 @@ def fetch_odds(league: str, api_key: str = ODDS_API_KEY) -> List[OddsQuote]:
     resp = requests.get(
         f"{ODDS_BASE_URL}/sports/{sport_key}/odds",
         params={"apiKey": api_key, "regions": "uk,eu", "markets": "h2h", "oddsFormat": "decimal"},
+        timeout=15,
     )
     resp.raise_for_status()
     quotes = []

@@ -17,6 +17,7 @@ Deploy: see DEPLOY.md for the free Render.com walkthrough.
 """
 
 import os
+import threading
 import logging
 from datetime import datetime, timezone
 from typing import Optional
@@ -107,7 +108,14 @@ def refresh_all():
 
 @app.on_event("startup")
 def startup():
-    refresh_all()
+    # IMPORTANT: don't call refresh_all() directly here. Fetching 5 leagues'
+    # worth of data can take long enough that Render's port check times out
+    # before the server finishes starting, producing a "no open ports
+    # detected" deploy failure. Running it in a background thread lets
+    # uvicorn bind the port and report healthy immediately, while the first
+    # data load happens moments later. /health will show cached_leagues: []
+    # for the first ~10-30 seconds — that's expected, not a bug.
+    threading.Thread(target=refresh_all, daemon=True).start()
     scheduler = BackgroundScheduler()
     scheduler.add_job(refresh_all, "interval", hours=REFRESH_HOURS)
     scheduler.start()
