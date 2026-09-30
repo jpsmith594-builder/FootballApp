@@ -27,14 +27,20 @@ from fastapi.middleware.cors import CORSMiddleware
 from apscheduler.schedulers.background import BackgroundScheduler
 
 from data_fetcher import FootballDataClient, LEAGUES
-from poisson_model import DixonColesModel
-from value_bet import fetch_odds, find_value_bets, ODDS_SPORT_KEYS
+from poisson_model import DixonColesModel, blend_with_market
+from value_bet import fetch_odds, find_value_bets, devig, ODDS_SPORT_KEYS
+import db
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("api_server")
 
 REFRESH_HOURS = float(os.environ.get("REFRESH_HOURS", "6"))
 ODDS_ENABLED = bool(os.environ.get("ODDS_API_KEY"))
+# How much trust goes to the model vs. the market when blending the
+# *displayed* prediction. 1.0 = ignore the market, 0.0 = ignore the model.
+# Value-bet detection always uses the raw, unblended model output regardless
+# of this setting — see poisson_model.blend_with_market()'s docstring.
+BLEND_WEIGHT = float(os.environ.get("BLEND_WEIGHT", "0.5"))
 
 app = FastAPI(title="Matchday Predictor API")
 
@@ -69,29 +75,55 @@ def refresh_league(league_name: str):
         predictions = []
         for fx in fixtures:
             try:
-                pred = model.predict(fx.home, fx.away)
+                pred = model.predict(fx.home, fx.away)  # raw model — used for value bets & storage
             except ValueError:
                 continue  # team with no fitted history (e.g. newly promoted)
-            entry = {
-                "home": fx.home, "away": fx.away, "date": fx.date,
-                "home_crest": fx.home_crest, "away_crest": fx.away_crest,
-                "home_win": round(pred["home_win"], 4),
-                "draw": round(pred["draw"], 4),
-                "away_win": round(pred["away_win"], 4),
-                "predicted_score": pred["most_likely_score"],
-                "expected_goals": pred["expected_goals"],
-                "over_2_5": round(pred["over_2_5"], 4),
-                "value_bets": [],
-            }
+
             quote = odds_by_fixture.get((fx.home, fx.away))
+            value_bets = []
+            display_probs = {"home_win": pred["home_win"], "draw": pred["draw"], "away_win": pred["away_win"]}
+
             if quote:
                 bets = find_value_bets(f"{fx.home} vs {fx.away}", pred, quote)
-                entry["value_bets"] = [
+                value_bets = [
                     {"market": b.market, "odds": b.odds, "edge": round(b.edge, 4),
                      "kelly_stake": round(b.kelly_stake, 4)}
                     for b in bets
                 ]
+                # Blend for DISPLAY only. find_value_bets() above already ran
+                # against the raw, unblended `pred` — that ordering matters.
+                fair_h, fair_d, fair_a = devig(quote.home_odds, quote.draw_odds, quote.away_odds)
+                display_probs = blend_with_market(pred, fair_h, fair_d, fair_a, weight=BLEND_WEIGHT)
+
+            entry = {
+                "home": fx.home, "away": fx.away, "date": fx.date,
+                "home_crest": fx.home_crest, "away_crest": fx.away_crest,
+                "home_win": round(display_probs["home_win"], 4),
+                "draw": round(display_probs["draw"], 4),
+                "away_win": round(display_probs["away_win"], 4),
+                "predicted_score": pred["most_likely_score"],
+                "expected_goals": pred["expected_goals"],
+                "over_2_5": round(pred["over_2_5"], 4),
+                "btts_yes": round(pred["btts_yes"], 4),
+                "value_bets": value_bets,
+            }
             predictions.append(entry)
+
+            # Record for the track record tab. Uses the raw model prediction,
+            # not the blended display value — the track record should judge
+            # your model, not a moving target of model+market averages.
+            try:
+                db.record_prediction(league_name, fx.home, fx.away, fx.date, pred,
+                                      value_bets[0] if value_bets else None)
+            except Exception as e:
+                log.warning(f"Could not record prediction for track record: {e}")
+
+        # Reconcile any previously-recorded predictions whose matches have
+        # since finished, using the same `results` fetched above.
+        try:
+            db.resolve_predictions(league_name, results)
+        except Exception as e:
+            log.warning(f"Could not resolve past predictions: {e}")
 
         _cache[league_name] = {
             "predictions": predictions,
@@ -145,6 +177,14 @@ def get_predictions(league_name: str):
     if league_name not in _cache:
         raise HTTPException(503, "Data not ready yet — try again shortly")
     return _cache[league_name]
+
+
+@app.get("/track-record/{league_name}")
+def get_track_record(league_name: str):
+    if league_name not in LEAGUES:
+        raise HTTPException(404, f"Unknown league. Choose from: {list(LEAGUES.keys())}")
+    rows = db.get_track_record(league_name)
+    return {"league": league_name, "summary": db.summarize_track_record(rows), "history": rows}
 
 
 @app.get("/health")
