@@ -49,6 +49,8 @@ class Match:
     home_goals: Optional[int] = None   # None for fixtures that haven't been played
     away_goals: Optional[int] = None
     status: str = "SCHEDULED"          # SCHEDULED | FINISHED | LIVE
+    home_crest: Optional[str] = None   # URL to team badge, from football-data.org
+    away_crest: Optional[str] = None
 
 
 class FootballDataClient:
@@ -93,6 +95,8 @@ class FootballDataClient:
                 home_goals=score["home"],
                 away_goals=score["away"],
                 status="FINISHED",
+                home_crest=m["homeTeam"].get("crest"),
+                away_crest=m["awayTeam"].get("crest"),
             ))
         return matches
 
@@ -106,7 +110,8 @@ class FootballDataClient:
         )
         return [
             Match(home=m["homeTeam"]["name"], away=m["awayTeam"]["name"],
-                  date=m["utcDate"], status="SCHEDULED")
+                  date=m["utcDate"], status="SCHEDULED",
+                  home_crest=m["homeTeam"].get("crest"), away_crest=m["awayTeam"].get("crest"))
             for m in data.get("matches", [])
         ]
 

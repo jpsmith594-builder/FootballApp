@@ -74,6 +74,7 @@ def refresh_league(league_name: str):
                 continue  # team with no fitted history (e.g. newly promoted)
             entry = {
                 "home": fx.home, "away": fx.away, "date": fx.date,
+                "home_crest": fx.home_crest, "away_crest": fx.away_crest,
                 "home_win": round(pred["home_win"], 4),
                 "draw": round(pred["draw"], 4),
                 "away_win": round(pred["away_win"], 4),
@@ -119,6 +120,17 @@ def startup():
     scheduler = BackgroundScheduler()
     scheduler.add_job(refresh_all, "interval", hours=REFRESH_HOURS)
     scheduler.start()
+
+
+@app.get("/")
+def root():
+    # This is a JSON API with no visual homepage — visiting the bare URL in a
+    # browser is expected to look like "just data," not a 404. The actual
+    # frontend (index.html) is what renders a real page, hosted separately.
+    return {
+        "service": "Matchday Predictor API",
+        "try_these": ["/health", "/leagues", "/predictions/Premier League"],
+    }
 
 
 @app.get("/leagues")
