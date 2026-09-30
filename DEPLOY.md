@@ -1,9 +1,10 @@
 # Going live: full deployment guide
 
-## 1. Get your API keys (5 min)
+## 1. Get your API keys and database (10 min)
 
 - **football-data.org**: register free at https://www.football-data.org/client/register — key arrives by email instantly.
-- **the-odds-api.com** (optional, only needed for value bets): free tier gives 500 requests/month, plenty for daily refreshes across 5 leagues.
+- **the-odds-api.com** (optional, only needed for value bets): free tier gives 500 requests/month.
+- **Supabase** (needed for the Track Record tab): create a free project at https://supabase.com, then go to Project Settings > Database and copy the connection string (the "URI" one, not the individual host/port fields). This is what actually stores your prediction history — without it, the app falls back to a local SQLite file that Render wipes on every restart, and your track record would reset constantly.
 
 ## 2. Put the code on GitHub
 
@@ -21,6 +22,8 @@ Render deploys from a GitHub repo. Create a new repo, push everything in this
 4. Under **Environment**, add:
    - `FOOTBALL_DATA_API_KEY` = your key from step 1
    - `ODDS_API_KEY` = your key from step 1 (optional)
+   - `DATABASE_URL` = your Supabase connection string from step 1
+   - `BLEND_WEIGHT` = optional, 0-1, defaults to 0.5 (how much the displayed prediction trusts your model vs. the bookmaker's odds — 1.0 ignores the market entirely)
 5. Deploy. Render gives you a URL like `https://matchday-predictor.onrender.com`.
 6. Visit `https://your-url.onrender.com/health` — you should see `{"status": "ok"}`
    once the first data refresh finishes (can take a minute or two on first boot).
