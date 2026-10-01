@@ -25,13 +25,37 @@ from sqlalchemy import (
 )
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "sqlite:///matchday_local.db")
-# Some providers (including Render's own Postgres) hand out URLs starting
-# with postgres:// — SQLAlchemy 1.4+/2.0 requires postgresql:// instead.
+# Some providers (including Render's own Postgres, and some Supabase
+# connection-string variants) hand out URLs starting with "postgres" rather
+# than "postgresql" — SQLAlchemy dropped the "postgres" dialect alias, so
+# "postgres://..." and "postgres+psycopg://..." both need the "postgresql"
+# form or SQLAlchemy raises a dialect-loading error at engine creation time.
 if DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+elif DATABASE_URL.startswith("postgres+"):
+    DATABASE_URL = DATABASE_URL.replace("postgres+", "postgresql+", 1)
 
 engine = create_engine(DATABASE_URL, pool_pre_ping=True)
 metadata = MetaData()
+
+team_adjustments = Table(
+    "team_adjustments", metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("league", String, nullable=False),
+    Column("team", String, nullable=False),
+    Column("goal_multiplier", Float, nullable=False),  # e.g. 0.8 = "missing a key attacker"
+    Column("note", String, nullable=True),
+    Column("set_at", DateTime),
+)
+
+push_subscriptions = Table(
+    "push_subscriptions", metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("endpoint", String, nullable=False, unique=True),
+    Column("p256dh", String, nullable=False),
+    Column("auth", String, nullable=False),
+    Column("created_at", DateTime),
+)
 
 predictions = Table(
     "predictions", metadata,
@@ -58,11 +82,14 @@ metadata.create_all(engine)
 
 
 def record_prediction(league: str, home: str, away: str, match_date: str, pred: dict,
-                       value_bet: dict = None):
+                       value_bet: dict = None) -> bool:
     """Insert a prediction only if this exact fixture hasn't been recorded
     yet. This is what keeps the track record honest — once stored, a later
     refresh must never overwrite it, or the app could quietly 're-predict'
-    with hindsight as kickoff approaches."""
+    with hindsight as kickoff approaches. Returns True if this call actually
+    inserted a new row (used to decide whether to fire a push notification —
+    without this check, every 6-hour refresh would re-notify for the same
+    value bet)."""
     with engine.begin() as conn:
         exists = conn.execute(
             select(predictions.c.id).where(and_(
@@ -73,7 +100,7 @@ def record_prediction(league: str, home: str, away: str, match_date: str, pred: 
             ))
         ).first()
         if exists:
-            return
+            return False
         conn.execute(insert(predictions).values(
             league=league, home=home, away=away, match_date=match_date,
             predicted_home_win=pred["home_win"], predicted_draw=pred["draw"],
@@ -86,6 +113,7 @@ def record_prediction(league: str, home: str, away: str, match_date: str, pred: 
             resolved=False,
             recorded_at=datetime.now(timezone.utc),
         ))
+        return True
 
 
 def resolve_predictions(league: str, finished_matches: list):
@@ -115,6 +143,65 @@ def get_track_record(league: str, limit: int = 100) -> list:
             )).order_by(predictions.c.match_date.desc()).limit(limit)
         ).mappings().all()
     return [dict(r) for r in rows]
+
+
+def set_team_adjustment(league: str, team: str, goal_multiplier: float, note: str = None):
+    """Manual override for when you know something the model doesn't —
+    e.g. a star striker is injured. Replaces any existing adjustment for
+    this team in this league rather than stacking multiple."""
+    with engine.begin() as conn:
+        conn.execute(delete_adjustment_stmt(league, team))
+        conn.execute(insert(team_adjustments).values(
+            league=league, team=team, goal_multiplier=goal_multiplier,
+            note=note, set_at=datetime.now(timezone.utc),
+        ))
+
+
+def delete_adjustment_stmt(league: str, team: str):
+    from sqlalchemy import delete
+    return delete(team_adjustments).where(and_(
+        team_adjustments.c.league == league, team_adjustments.c.team == team,
+    ))
+
+
+def clear_team_adjustment(league: str, team: str):
+    with engine.begin() as conn:
+        conn.execute(delete_adjustment_stmt(league, team))
+
+
+def get_team_adjustments(league: str) -> dict:
+    """Returns {team_name: goal_multiplier} for quick lookup during prediction."""
+    with engine.begin() as conn:
+        rows = conn.execute(
+            select(team_adjustments.c.team, team_adjustments.c.goal_multiplier)
+            .where(team_adjustments.c.league == league)
+        ).all()
+    return {r.team: r.goal_multiplier for r in rows}
+
+
+def save_push_subscription(endpoint: str, p256dh: str, auth: str):
+    with engine.begin() as conn:
+        existing = conn.execute(
+            select(push_subscriptions.c.id).where(push_subscriptions.c.endpoint == endpoint)
+        ).first()
+        if existing:
+            return  # already subscribed, nothing to do
+        conn.execute(insert(push_subscriptions).values(
+            endpoint=endpoint, p256dh=p256dh, auth=auth,
+            created_at=datetime.now(timezone.utc),
+        ))
+
+
+def get_push_subscriptions() -> list:
+    with engine.begin() as conn:
+        rows = conn.execute(select(push_subscriptions)).mappings().all()
+    return [dict(r) for r in rows]
+
+
+def remove_push_subscription(endpoint: str):
+    from sqlalchemy import delete
+    with engine.begin() as conn:
+        conn.execute(delete(push_subscriptions).where(push_subscriptions.c.endpoint == endpoint))
 
 
 def summarize_track_record(rows: list) -> dict:

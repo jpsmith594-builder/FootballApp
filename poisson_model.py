@@ -141,8 +141,19 @@ class DixonColesModel:
         lam_away = np.exp(a.attack_away + h.defense_home)
         return float(lam_home), float(lam_away)
 
-    def predict(self, home: str, away: str, max_goals: int = 8) -> dict:
+    def predict(self, home: str, away: str, max_goals: int = 8,
+                home_goal_multiplier: float = 1.0, away_goal_multiplier: float = 1.0) -> dict:
+        """
+        home_goal_multiplier / away_goal_multiplier scale the expected goals
+        for that side before building the scoreline grid — this is the hook
+        for manual injury/lineup adjustments (e.g. 0.8 for "missing their
+        top striker"). No free API gives reliable real-time injury data, so
+        this is meant to be set by hand via the /admin/team-adjustment
+        endpoint in api_server.py when you know something the model can't.
+        """
         lam_h, lam_a = self.expected_goals(home, away)
+        lam_h *= home_goal_multiplier
+        lam_a *= away_goal_multiplier
         grid = np.zeros((max_goals + 1, max_goals + 1))
         for i in range(max_goals + 1):
             for j in range(max_goals + 1):
