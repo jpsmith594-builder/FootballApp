@@ -35,6 +35,8 @@
   .value-bet{ margin-top:.6rem; padding:.5rem .7rem; background:rgba(232,162,61,0.15); border:1px solid var(--amber); border-radius:8px; font-size:.8rem; }
   .hint{ margin-top:.6rem; padding:.5rem .7rem; background:rgba(79,169,138,0.12); border:1px solid #4FA98A; border-radius:8px; font-size:.8rem; color:var(--chalk); }
   .hint b{ color:#4FA98A; }
+  .alt-hint{ margin-top:.5rem; padding:.45rem .7rem; background:rgba(243,241,234,0.03); border:1px dashed var(--line); border-radius:8px; font-size:.76rem; color:var(--muted); }
+  .alt-hint b{ color:var(--chalk); font-weight:500; }
   .status{padding:2rem; text-align:center; color:var(--muted);}
   .view-switch{display:flex; gap:.4rem; padding:1rem 1.2rem 0;}
   .view-btn{flex:1; padding:.55rem; border-radius:10px; border:1px solid var(--line); background:transparent; color:var(--muted); font-family:'Oswald',sans-serif; font-size:.85rem; cursor:pointer;}
@@ -217,6 +219,7 @@ function renderFixtures(predictions){
       </div>
       ${tinyNotes ? `<div class="fx-date" style="margin-top:.4rem;margin-bottom:0;">${tinyNotes}</div>` : ''}
       ${p.hint ? `<div class="hint">💡 <b>Play ${p.hint.market}:</b> ${p.hint.selection} <span style="color:var(--muted);">(${(p.hint.confidence*100).toFixed(0)}% confidence)</span></div>` : ''}
+      ${p.alternative_hint ? `<div class="alt-hint">Alternative: <b>${p.alternative_hint.market} ${p.alternative_hint.selection}</b> (${(p.alternative_hint.confidence*100).toFixed(0)}% confidence)</div>` : ''}
       ${(p.value_bets||[]).map(b => `<div class="value-bet">Value bet: ${b.market} @ ${b.odds} (edge ${(b.edge*100).toFixed(1)}%)</div>`).join('')}
     </div>
   `;
