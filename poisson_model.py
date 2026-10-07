@@ -20,6 +20,17 @@ model has no way to see, so a blended forecast is typically better
 calibrated than the model alone — but that blended number must only be
 used for *display*, never for value-bet detection, since blending toward
 the market is exactly what would erase the edge you're trying to find.
+
+CROSS-COMPETITION PRIORS: fit() accepts an optional `priors` dict mapping
+team name -> TeamRating, used to regularize toward instead of toward zero.
+This exists for competitions like the Champions League, where early in a
+campaign there often aren't 20 played matches yet (or the ones that exist
+are too few to pin down a reliable rating). Seeding a team's European
+rating from their domestic league rating — where the same team usually has
+a full season of data — gives the model a sensible starting point instead
+of an uninformed guess, and lets actual European results pull the rating
+away from that prior as they accumulate. A team not present in `priors`
+(e.g. truly no data anywhere) still regularizes toward zero, same as before.
 """
 
 import numpy as np
@@ -49,7 +60,18 @@ class DixonColesModel:
 
     # ---- fitting ----
 
-    def fit(self, matches: List[Match]):
+    def fit(self, matches: List[Match], priors: Dict[str, TeamRating] = None,
+             prior_weight: float = 0.02):
+        """
+        priors: optional {team_name: TeamRating}, e.g. that team's ratings
+        fitted from their domestic league. A team found in `priors` is
+        regularized toward that rating instead of toward zero; a team not
+        in `priors` still regularizes toward zero exactly as before — so
+        passing no priors reproduces the old behavior exactly.
+        prior_weight: same role as the old fixed 0.02 L2 regularization
+        constant, just now pulling toward a (possibly non-zero) prior
+        instead of always toward zero.
+        """
         played = [m for m in matches if m.home_goals is not None]
         if len(played) < 20:
             raise ValueError("Need at least ~20 played matches to fit a stable model")
@@ -64,15 +86,29 @@ class DixonColesModel:
             for m in played
         ])
 
+        priors = priors or {}
+        prior_ah = np.zeros(n)
+        prior_dh = np.zeros(n)
+        prior_aa = np.zeros(n)
+        prior_da = np.zeros(n)
+        for t in self.teams:
+            if t in priors:
+                p = priors[t]
+                i = idx[t]
+                prior_ah[i], prior_dh[i] = p.attack_home, p.defense_home
+                prior_aa[i], prior_da[i] = p.attack_away, p.defense_away
+
         # Parameter vector: [attack_home(n), defense_home(n), attack_away(n), defense_away(n), rho]
         # Splitting home/away doubles the parameter count versus a single
         # combined rating, so the L2 regularization weight is a bit higher
         # here to keep teams with thin data (e.g. newly promoted sides, or
         # anyone in a short competition like the Champions League group
-        # stage) from swinging to extreme, overfit values.
+        # stage) from swinging to extreme, overfit values. Starting the
+        # optimizer at the priors (rather than always at zero) also helps
+        # it converge faster when most teams already have a sensible
+        # starting point from their domestic rating.
         n_params = 4 * n
-        x0 = np.zeros(n_params + 1)
-        x0[-1] = -0.05  # rho
+        x0 = np.concatenate([prior_ah, prior_dh, prior_aa, prior_da, [-0.05]])
 
         def unpack(x):
             ah = x[0:n]
@@ -94,7 +130,10 @@ class DixonColesModel:
                 tau = self._tau(m.home_goals, m.away_goals, lam_home, lam_away, rho)
                 p = max(p_home * p_away * tau, 1e-10)
                 ll += w * np.log(p)
-            reg = 0.02 * np.sum(ah**2) + 0.02 * np.sum(dh**2) + 0.02 * np.sum(aa**2) + 0.02 * np.sum(da**2)
+            reg = (prior_weight * np.sum((ah - prior_ah) ** 2)
+                   + prior_weight * np.sum((dh - prior_dh) ** 2)
+                   + prior_weight * np.sum((aa - prior_aa) ** 2)
+                   + prior_weight * np.sum((da - prior_da) ** 2))
             return -ll + reg
 
         constraints = [
@@ -113,6 +152,49 @@ class DixonColesModel:
             self.ratings[t] = TeamRating(
                 attack_home=float(ah[i]), defense_home=float(dh[i]),
                 attack_away=float(aa[i]), defense_away=float(da[i]),
+            )
+
+    def apply_promoted_team_shrinkage(self, matches: List[Match], min_matches: int = 15,
+                                       newcomer_prior=(-0.15, 0.15, -0.20, 0.20)):
+        """
+        Call after fit(). A team with only a handful of matches can get an
+        extreme fitted rating driven almost entirely by a lucky or unlucky
+        run — three wins in their first three games says much less about
+        true quality than three wins out of thirty. This pulls any
+        under-sampled team's rating toward a "below-average newcomer" prior,
+        proportionally to how little data they have: full shrink at 0
+        matches, no shrink at `min_matches` or more, linear in between.
+
+        The prior itself is deliberately below average (slightly worse
+        attack, slightly worse defense on both sides) rather than neutral —
+        newly promoted teams historically underperform a neutral-rated
+        guess in their first season at a new level, so neutral would still
+        be too generous.
+
+        newcomer_prior = (attack_home, defense_home, attack_away, defense_away).
+        This is independent of fit()'s cross-competition `priors` argument:
+        that seeds a team's rating from a DIFFERENT competition's data
+        (e.g. domestic league rating for a Champions League debut), while
+        this handles a team with genuinely little data anywhere.
+        """
+        match_counts: Dict[str, int] = {}
+        for m in matches:
+            if m.home_goals is None:
+                continue
+            match_counts[m.home] = match_counts.get(m.home, 0) + 1
+            match_counts[m.away] = match_counts.get(m.away, 0) + 1
+
+        p_ah, p_dh, p_aa, p_da = newcomer_prior
+        for team, rating in list(self.ratings.items()):
+            n = match_counts.get(team, 0)
+            if n >= min_matches:
+                continue
+            shrink = max(0.0, (min_matches - n) / min_matches)
+            self.ratings[team] = TeamRating(
+                attack_home=(1 - shrink) * rating.attack_home + shrink * p_ah,
+                defense_home=(1 - shrink) * rating.defense_home + shrink * p_dh,
+                attack_away=(1 - shrink) * rating.attack_away + shrink * p_aa,
+                defense_away=(1 - shrink) * rating.defense_away + shrink * p_da,
             )
 
     @staticmethod

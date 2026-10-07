@@ -154,7 +154,7 @@ def refresh_league(league_name: str):
         # toward a below-average "newcomer" prior rather than trusted at
         # face value — see poisson_model.apply_promoted_team_shrinkage's
         # docstring for why. No-op for any team with enough matches already.
-        
+        model.apply_promoted_team_shrinkage(results)
         elo = EloModel()
         elo.fit(results)
         adjustments = db.get_team_adjustments(league_name)
@@ -256,6 +256,54 @@ def refresh_all():
         refresh_league(name)
 
 
+def build_parlay_board(cache: dict, limit: int = 15):
+    """
+    Pulls together every cached fixture, across every league, that already
+    has a hint attached (generate_hint() only returns one once a market
+    clears its own confidence bar — see its docstring), and ranks them by
+    that hint's confidence, highest first.
+
+    Deliberately does NOT compute or display a combined parlay price. Real
+    odds are only ever fetched for the 1X2 market (value_bet.py), while
+    these hints frequently recommend Win-or-Draw or BTTS — markets with no
+    fetched price. Inventing a combined payout for an untraded market would
+    be a fabricated number dressed up as a stat, so this only ever reports
+    probabilities, never odds or payouts.
+    """
+    picks = []
+    for league_name, data in cache.items():
+        for entry in data.get("predictions", []):
+            hint = entry.get("hint")
+            if not hint:
+                continue
+            picks.append({
+                "league": league_name,
+                "home": entry["home"],
+                "away": entry["away"],
+                "date": entry["date"],
+                "home_crest": entry.get("home_crest"),
+                "away_crest": entry.get("away_crest"),
+                "predicted_score": entry.get("predicted_score"),
+                "hint": hint,
+                "alternative_hint": entry.get("alternative_hint"),
+            })
+    picks.sort(key=lambda p: p["hint"]["confidence"], reverse=True)
+    top = picks[:limit]
+    # Combined probability if every leg above were parlayed together —
+    # shown once, as context for why stacking legs is high-variance, not as
+    # an invitation to bet the whole board. Legs are treated as independent,
+    # which overstates the true combined probability whenever two picks
+    # share a common factor (same team context, same matchday conditions).
+    combined_probability = 1.0
+    for p in top:
+        combined_probability *= p["hint"]["confidence"]
+    return {
+        "picks": top,
+        "combined_probability_if_all_legs_selected": round(combined_probability, 6) if top else None,
+        "total_candidates": len(picks),
+    }
+
+
 @app.on_event("startup")
 def startup():
     # IMPORTANT: don't call refresh_all() directly here. Fetching 5 leagues'
@@ -294,6 +342,18 @@ def get_predictions(league_name: str):
     if league_name not in _cache:
         raise HTTPException(503, "Data not ready yet — try again shortly")
     return _cache[league_name]
+
+
+@app.get("/parlay-builder")
+def get_parlay_builder(limit: int = 15):
+    """
+    Cross-league board of the highest-confidence hints currently cached,
+    ranked descending. See build_parlay_board()'s docstring for why no
+    combined odds/payout figure is shown.
+    """
+    if not _cache:
+        raise HTTPException(503, "Data not ready yet — try again shortly")
+    return build_parlay_board(_cache, limit=limit)
 
 
 @app.get("/track-record/{league_name}")
