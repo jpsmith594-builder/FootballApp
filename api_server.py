@@ -154,7 +154,7 @@ def refresh_league(league_name: str):
         # toward a below-average "newcomer" prior rather than trusted at
         # face value — see poisson_model.apply_promoted_team_shrinkage's
         # docstring for why. No-op for any team with enough matches already.
-        model.apply_promoted_team_shrinkage(results)
+        
         elo = EloModel()
         elo.fit(results)
         adjustments = db.get_team_adjustments(league_name)
