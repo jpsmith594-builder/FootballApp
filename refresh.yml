@@ -1,0 +1,41 @@
+name: Refresh predictions cache
+
+# Runs the heavy "compute predictions" work on a schedule, completely
+# independent of Render. This is the piece that makes cold starts a
+# non-issue: by the time anyone opens the app, Supabase already has fresh
+# data sitting in it from the most recent run of this workflow.
+#
+# Replaces the old approach of pinging a Render URL every hour (cron-job.org
+# or similar) to keep a free-tier web service "warm" — that still paid the
+# full cold-start + model-fit cost on every ping, it just paid it on a
+# schedule instead of when a user showed up. Running the script directly in
+# a GitHub Actions runner has no server to wake up at all.
+
+on:
+  schedule:
+    - cron: "7 * * * *"  # a few minutes past the hour, every hour (UTC)
+  workflow_dispatch: {}  # lets you trigger it manually from the Actions tab
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run refresh_cache.py
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          FOOTBALL_DATA_API_KEY: ${{ secrets.FOOTBALL_DATA_API_KEY }}
+          ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+          VAPID_PRIVATE_KEY: ${{ secrets.VAPID_PRIVATE_KEY }}
+          VAPID_PUBLIC_KEY: ${{ secrets.VAPID_PUBLIC_KEY }}
+          VAPID_CLAIMS_EMAIL: ${{ secrets.VAPID_CLAIMS_EMAIL }}
+        run: python refresh_cache.py

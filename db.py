@@ -21,7 +21,7 @@ import os
 from datetime import datetime, timezone
 from sqlalchemy import (
     create_engine, MetaData, Table, Column, Integer, String, Float, Boolean,
-    DateTime, select, and_, insert, update,
+    DateTime, JSON, select, and_, insert, update, delete,
 )
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "sqlite:///matchday_local.db")
@@ -78,7 +78,99 @@ predictions = Table(
     Column("recorded_at", DateTime),
 )
 
+# --- Fast-read cache for the frontend ---
+# This is NOT the track-record history above — it's a disposable snapshot of
+# "the current upcoming fixtures and their predictions", fully replaced on
+# every refresh. Its only job is to let the frontend (or anyone else) read
+# already-computed predictions straight out of Postgres in milliseconds,
+# instead of waiting for a cold-started server to fit the model first. See
+# refresh_cache.py and engine.py for who writes it.
+cached_fixtures = Table(
+    "cached_fixtures", metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("league", String, nullable=False),
+    Column("home", String, nullable=False),
+    Column("away", String, nullable=False),
+    Column("match_date", String, nullable=False),
+    Column("home_crest", String, nullable=True),
+    Column("away_crest", String, nullable=True),
+    Column("home_win", Float),
+    Column("draw", Float),
+    Column("away_win", Float),
+    Column("predicted_score_home", Integer),
+    Column("predicted_score_away", Integer),
+    Column("over_2_5", Float),
+    Column("btts_yes", Float),
+    Column("value_bets", JSON),
+    Column("hint", JSON),
+    Column("alternative_hint", JSON),
+    Column("updated_at", DateTime),
+)
+
+# One row per league: when it was last (re)computed and how many fixtures
+# came out of that run. The frontend uses this to show "updated Xm ago"
+# and to tell "still loading" apart from "genuinely no fixtures this week".
+refresh_meta = Table(
+    "refresh_meta", metadata,
+    Column("league", String, primary_key=True),
+    Column("fitted_at", DateTime),
+    Column("fixture_count", Integer),
+)
+
 metadata.create_all(engine)
+
+
+def replace_cached_fixtures(league: str, predictions: list, fitted_at: str):
+    """
+    Wholesale replace of one league's cached fixture slate — simpler and
+    safer than a row-by-row upsert here, because the *set* of upcoming
+    fixtures itself changes between refreshes (a match drops off the list
+    once it's kicked off, a new one appears as it enters the fetch window).
+    A partial upsert would leave stale rows behind for fixtures that have
+    since left the window; delete-then-reinsert can't.
+    """
+    with engine.begin() as conn:
+        conn.execute(delete(cached_fixtures).where(cached_fixtures.c.league == league))
+        if predictions:
+            conn.execute(insert(cached_fixtures), [
+                {
+                    "league": league, "home": p["home"], "away": p["away"],
+                    "match_date": p["date"], "home_crest": p.get("home_crest"),
+                    "away_crest": p.get("away_crest"), "home_win": p["home_win"],
+                    "draw": p["draw"], "away_win": p["away_win"],
+                    "predicted_score_home": p["predicted_score"][0],
+                    "predicted_score_away": p["predicted_score"][1],
+                    "over_2_5": p["over_2_5"], "btts_yes": p["btts_yes"],
+                    "value_bets": p["value_bets"], "hint": p["hint"],
+                    "alternative_hint": p["alternative_hint"],
+                    "updated_at": datetime.now(timezone.utc),
+                }
+                for p in predictions
+            ])
+        exists = conn.execute(
+            select(refresh_meta.c.league).where(refresh_meta.c.league == league)
+        ).first()
+        fitted_at_dt = datetime.fromisoformat(fitted_at.replace("Z", "+00:00")) if isinstance(fitted_at, str) else fitted_at
+        if exists:
+            conn.execute(
+                update(refresh_meta).where(refresh_meta.c.league == league)
+                .values(fitted_at=fitted_at_dt, fixture_count=len(predictions))
+            )
+        else:
+            conn.execute(insert(refresh_meta).values(
+                league=league, fitted_at=fitted_at_dt, fixture_count=len(predictions)
+            ))
+
+
+def get_cached_fixtures(league: str) -> list:
+    """Local-dev/testing convenience — the deployed frontend reads this same
+    table directly via the Supabase client instead of going through Python."""
+    with engine.begin() as conn:
+        rows = conn.execute(
+            select(cached_fixtures).where(cached_fixtures.c.league == league)
+            .order_by(cached_fixtures.c.match_date)
+        ).mappings().all()
+    return [dict(r) for r in rows]
 
 
 def record_prediction(league: str, home: str, away: str, match_date: str, pred: dict,
