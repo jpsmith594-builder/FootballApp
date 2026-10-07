@@ -90,8 +90,8 @@ const contentEl = document.getElementById('content');
 // refresh_meta and predictions, and INSERT-only on push_subscriptions (see
 // DEPLOY.md for the exact policies). It can never read or change anything
 // else in your database.
-const SUPABASE_URL = 'https://YOUR-PROJECT-REF.supabase.co';
-const SUPABASE_ANON_KEY = 'YOUR-ANON-PUBLIC-KEY';
+const SUPABASE_URL = 'https://wcblrwjcxtayczsptpuh.supabase.co/rest/v1/';
+const SUPABASE_ANON_KEY = 'sb_publishable_UZ5Q4Jsa-mRO44kHzYob-A_Duuv-O-u';
 const sb = (SUPABASE_URL.includes('YOUR-PROJECT-REF') || !window.supabase)
   ? null
   : window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
