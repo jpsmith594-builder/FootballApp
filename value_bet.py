@@ -32,7 +32,7 @@ ODDS_SPORT_KEYS = {
     "Premier League": "soccer_epl",
     "La Liga": "soccer_spain_la_liga",
     "Serie A": "soccer_italy_serie_a",
-    "Bundesliga": "soccer_germany_bundesliga1",
+    "Bundesliga": "soccer_germany_bundesliga",
     "Ligue 1": "soccer_france_ligue_one",
     "Champions League": "soccer_uefa_champs_league",
     "Eredivisie": "soccer_netherlands_eredivisie",
