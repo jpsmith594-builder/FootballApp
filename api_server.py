@@ -22,7 +22,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, Header
+from fastapi import FastAPI, HTTPException, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
 from apscheduler.schedulers.background import BackgroundScheduler
 
@@ -32,6 +32,7 @@ from elo_model import EloModel, ensemble as elo_ensemble
 from value_bet import fetch_odds, find_value_bets, devig, ODDS_SPORT_KEYS
 import db
 import push
+import billing
 
 # Error tracking (optional): set SENTRY_DSN to get alerted the moment
 # something breaks in production, instead of finding out when a friend
@@ -70,6 +71,38 @@ ADMIN_SECRET = os.environ.get("ADMIN_SECRET", "")
 HINT_STRAIGHT_WIN_MIN = float(os.environ.get("HINT_STRAIGHT_WIN_MIN", "0.58"))
 HINT_WIN_OR_DRAW_MIN = float(os.environ.get("HINT_WIN_OR_DRAW_MIN", "0.78"))
 HINT_BTTS_MIN = float(os.environ.get("HINT_BTTS_MIN", "0.58"))
+
+# --- Tiers ---
+# "free" sees fixtures and win/draw/away probabilities for every league, but
+# never hints or value bets — those are the Pro differentiators, and giving
+# them away for free removes the entire reason to upgrade. See
+# MONETIZATION.md for the full reasoning behind where this line is drawn.
+# A missing/invalid API key is treated as "free", not rejected outright —
+# the app stays usable without signing up, which is deliberate: the free
+# tier IS the funnel, not a locked door.
+FREE_DAILY_REQUEST_LIMIT = int(os.environ.get("FREE_DAILY_REQUEST_LIMIT", "100"))
+PRO_DAILY_REQUEST_LIMIT = int(os.environ.get("PRO_DAILY_REQUEST_LIMIT", "5000"))
+
+
+def get_current_tier(x_api_key: str = Header(default=None)) -> dict:
+    """
+    FastAPI dependency: resolves the caller's tier from their API key.
+    Deliberately permissive on a missing or unrecognized key — this
+    endpoint still has to work for an anonymous visitor on the free tier,
+    so "no key" means "free", not "403". Invalid/expired *paid* access is
+    what actually gets rejected, and only where real money is on the line
+    (billing-portal/webhook endpoints use their own stricter checks, not
+    this one).
+    """
+    if not x_api_key:
+        return {"tier": "free", "api_key": None, "email": None}
+    user = db.get_user_by_api_key(x_api_key)
+    if not user:
+        return {"tier": "free", "api_key": x_api_key, "email": None}
+    limit = PRO_DAILY_REQUEST_LIMIT if user["tier"] == "pro" else FREE_DAILY_REQUEST_LIMIT
+    if not db.check_and_increment_rate_limit(x_api_key, daily_limit=limit):
+        raise HTTPException(429, f"Daily request limit reached for the {user['tier']} tier")
+    return {"tier": user["tier"], "api_key": x_api_key, "email": user["email"]}
 
 
 def generate_hint(home: str, away: str, win_draw_away_probs: dict, btts_yes: float, btts_no: float):
