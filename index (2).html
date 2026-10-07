@@ -1,0 +1,412 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Matchday — Live Predictions</title>
+<link rel="manifest" href="manifest.json">
+<meta name="theme-color" content="#053B3A">
+<link rel="apple-touch-icon" href="icon-192.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Oswald:wght@500;600;700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<style>
+  /* Tropical Pitch theme: deep teal ground, lime and coral accents. */
+  :root{ --pitch:#053B3A; --chalk:#EAFBF4; --ink:#042625; --amber:#C7F464; --line:rgba(234,251,244,0.14); --muted:#7FB8AE; --coral:#FF7A59; }
+  *{box-sizing:border-box;}
+  body{ margin:0; background:var(--ink); color:var(--chalk); font-family:'Inter',sans-serif; }
+  h1,.tab,.score{font-family:'Oswald',sans-serif;}
+  header{ padding:1.6rem 1.2rem 1rem; background:linear-gradient(180deg,var(--pitch),var(--ink)); border-bottom:1px solid var(--line); }
+  h1{font-size:1.5rem; margin:0 0 .2rem;}
+  #config{ padding:.8rem 1.2rem; font-size:.8rem; color:var(--muted); }
+  #config input{ background:transparent; border:1px solid var(--line); color:var(--chalk); padding:.4rem .6rem; border-radius:6px; width:100%; max-width:420px; }
+  .tabs{display:flex; gap:.4rem; overflow-x:auto; padding:0 1.2rem 1rem;}
+  .tab{ padding:.5rem 1rem; border-radius:999px; border:1px solid var(--line); background:transparent; color:var(--muted); cursor:pointer; white-space:nowrap; font-size:.82rem; }
+  .tab.active{ background:var(--amber); color:var(--ink); border-color:var(--amber); }
+  main{max-width:640px; margin:0 auto; padding:0 1.2rem 3rem;}
+  .fixture{ background:rgba(234,251,244,0.04); border:1px solid var(--line); border-radius:14px; padding:1rem 1.1rem; margin-bottom:.9rem; }
+  .fx-date{ font-size:.72rem; color:var(--muted); letter-spacing:.03em; margin-bottom:.6rem; }
+  .teams{display:flex; align-items:center; justify-content:space-between; gap:.6rem;}
+  .team{flex:1; font-weight:600; display:flex; align-items:center; gap:.5rem;}
+  .team.away{justify-content:flex-end; text-align:right;}
+  .crest{width:22px; height:22px; object-fit:contain; flex:0 0 auto;}
+  .score{font-size:1.4rem; color:var(--amber); padding:0 .6rem; white-space:nowrap;}
+  .probs{display:flex; height:22px; border-radius:999px; overflow:hidden; margin-top:.8rem;}
+  .probs div{display:flex; align-items:center; justify-content:center; font-size:.68rem; font-weight:600; color:var(--ink); overflow:hidden; white-space:nowrap;}
+  .probs .home{background:var(--amber); color:var(--ink);} .probs .draw{background:var(--muted); color:var(--ink);} .probs .away{background:var(--coral); color:var(--ink);}
+  .value-bet{ margin-top:.6rem; padding:.5rem .7rem; background:rgba(199,244,100,0.15); border:1px solid var(--amber); border-radius:8px; font-size:.8rem; }
+  .hint{ margin-top:.6rem; padding:.5rem .7rem; background:rgba(199,244,100,0.14); border:1px solid var(--coral); border-radius:8px; font-size:.8rem; color:var(--chalk); }
+  .hint b{ color:var(--coral); }
+  .alt-hint{ margin-top:.5rem; padding:.45rem .7rem; background:rgba(234,251,244,0.03); border:1px dashed var(--line); border-radius:8px; font-size:.76rem; color:var(--muted); }
+  .alt-hint b{ color:var(--chalk); font-weight:500; }
+  .status{padding:2rem; text-align:center; color:var(--muted);}
+  .view-switch{display:flex; gap:.4rem; padding:1rem 1.2rem 0;}
+  .view-btn{flex:1; padding:.55rem; border-radius:10px; border:1px solid var(--line); background:transparent; color:var(--muted); font-family:'Oswald',sans-serif; font-size:.85rem; cursor:pointer;}
+  .view-btn.active{background:rgba(199,244,100,0.15); border-color:var(--amber); color:var(--amber);}
+  .summary-row{display:flex; gap:.6rem; flex-wrap:wrap; margin-bottom:1rem;}
+  .stat{flex:1; min-width:110px; background:rgba(234,251,244,0.04); border:1px solid var(--line); border-radius:10px; padding:.7rem; text-align:center;}
+  .stat .num{font-family:'Oswald',sans-serif; font-size:1.2rem; color:var(--amber);}
+  .stat .lbl{font-size:.68rem; color:var(--muted); text-transform:uppercase; letter-spacing:.04em;}
+  .tr-row{display:flex; align-items:center; justify-content:space-between; padding:.6rem 0; border-bottom:1px solid var(--line); font-size:.85rem; gap:.5rem;}
+  .tr-row:last-child{border-bottom:none;}
+  .tr-fixture{flex:1;}
+  .tr-result{color:var(--muted); font-size:.78rem;}
+  .tr-hit{color:var(--amber);} .tr-miss{color:var(--coral);}
+  .parlay-row{display:flex; gap:.7rem; align-items:flex-start; padding:.8rem 0; border-bottom:1px solid var(--line);}
+  .parlay-row:last-child{border-bottom:none;}
+  .parlay-rank{font-family:'Oswald',sans-serif; font-size:1.1rem; color:var(--amber); flex:0 0 1.6rem;}
+  .parlay-body{flex:1;}
+  .parlay-teams{font-weight:600;}
+  .parlay-league{font-size:.7rem; color:var(--muted); text-transform:uppercase; letter-spacing:.04em; margin-top:.1rem;}
+  .parlay-note{ margin-top:.8rem; padding:.6rem .8rem; background:rgba(234,251,244,0.04); border:1px dashed var(--line); border-radius:8px; font-size:.76rem; color:var(--muted); }
+</style>
+</head>
+<body>
+<header><h1>Matchday</h1><p style="margin:0;color:var(--muted);font-size:.85rem;">Live predictions from your model</p></header>
+<div class="view-switch">
+  <button class="view-btn active" id="viewFixtures">Fixtures</button>
+  <button class="view-btn" id="viewParlay">Parlay Builder</button>
+  <button class="view-btn" id="viewTrackRecord">Track Record</button>
+</div>
+<button class="view-btn" id="notifyBtn" style="margin:1rem 1.2rem 0;width:calc(100% - 2.4rem);">🔔 Enable value-bet notifications</button>
+<div class="tabs" id="tabs"></div>
+<main id="content"><div class="status">Enter your API URL above to load live predictions.</div></main>
+
+<script>
+const leagues = ["Premier League","La Liga","Serie A","Bundesliga","Ligue 1",
+                  "Champions League","Eredivisie","Championship","Brazil Serie A","Liga Portugal"];
+let active = leagues[0];
+const tabsEl = document.getElementById('tabs');
+const contentEl = document.getElementById('content');
+
+// Reads straight out of Supabase instead of calling a Render API — no
+// server to cold-start, no waiting for a model fit. engine.py (run on a
+// schedule by refresh_cache.py / GitHub Actions, NOT by this page) is what
+// keeps these tables fresh; this page only ever reads them.
+//
+// The anon key below is meant to be public — it's the same key Supabase's
+// own client-side docs tell you to ship in a browser. It can only do what
+// Row Level Security on each table allows: SELECT on cached_fixtures,
+// refresh_meta and predictions, and INSERT-only on push_subscriptions (see
+// DEPLOY.md for the exact policies). It can never read or change anything
+// else in your database.
+const SUPABASE_URL = 'https://YOUR-PROJECT-REF.supabase.co';
+const SUPABASE_ANON_KEY = 'YOUR-ANON-PUBLIC-KEY';
+const sb = (SUPABASE_URL.includes('YOUR-PROJECT-REF') || !window.supabase)
+  ? null
+  : window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+let view = 'fixtures'; // 'fixtures' | 'parlay' | 'trackrecord'
+const viewFixturesBtn = document.getElementById('viewFixtures');
+const viewParlayBtn = document.getElementById('viewParlay');
+const viewTrackRecordBtn = document.getElementById('viewTrackRecord');
+
+function setView(v){
+  view = v;
+  viewFixturesBtn.classList.toggle('active', v === 'fixtures');
+  viewParlayBtn.classList.toggle('active', v === 'parlay');
+  viewTrackRecordBtn.classList.toggle('active', v === 'trackrecord');
+  // League tabs pick a single league for Fixtures/Track Record — Parlay
+  // Builder spans every league at once, so there's nothing for them to do.
+  tabsEl.style.display = v === 'parlay' ? 'none' : 'flex';
+  loadActive();
+}
+viewFixturesBtn.onclick = () => setView('fixtures');
+viewParlayBtn.onclick = () => setView('parlay');
+viewTrackRecordBtn.onclick = () => setView('trackrecord');
+
+function loadActive(){
+  if(view === 'fixtures') loadLeague(active);
+  else if(view === 'parlay') loadParlayBoard();
+  else loadTrackRecord(active);
+}
+
+function renderTabs(){
+  tabsEl.innerHTML = '';
+  leagues.forEach(name => {
+    const b = document.createElement('button');
+    b.className = 'tab' + (name === active ? ' active' : '');
+    b.textContent = name;
+    b.onclick = () => { active = name; renderTabs(); loadActive(); };
+    tabsEl.appendChild(b);
+  });
+}
+
+function noSupabaseConfigured(){
+  contentEl.innerHTML = `<div class="status">Set SUPABASE_URL and SUPABASE_ANON_KEY near the top of this file's &lt;script&gt; block
+    (Supabase dashboard → Project Settings → API) to connect this page to your data.</div>`;
+}
+
+async function loadLeague(name){
+  if(!sb){ noSupabaseConfigured(); return; }
+  contentEl.innerHTML = '<div class="status">Loading...</div>';
+  try{
+    const { data, error } = await sb.from('cached_fixtures').select('*')
+      .eq('league', name).order('match_date', { ascending: true });
+    if(error) throw error;
+    renderFixtures((data || []).map(rowToPrediction));
+  }catch(err){
+    contentEl.innerHTML = `<div class="status">Couldn't load predictions: ${err.message}<br>Check your Supabase URL/key and that refresh_cache.py has run at least once.</div>`;
+  }
+}
+
+// Maps a cached_fixtures row (flat SQL columns) back into the same shape
+// renderFixtures() was already written against (predicted_score as a pair,
+// etc.) — keeps the rendering code below unchanged either way data arrives.
+function rowToPrediction(r){
+  return {
+    home: r.home, away: r.away, date: r.match_date,
+    home_crest: r.home_crest, away_crest: r.away_crest,
+    home_win: r.home_win, draw: r.draw, away_win: r.away_win,
+    predicted_score: [r.predicted_score_home, r.predicted_score_away],
+    over_2_5: r.over_2_5, btts_yes: r.btts_yes,
+    value_bets: r.value_bets || [], hint: r.hint, alternative_hint: r.alternative_hint,
+  };
+}
+
+async function loadTrackRecord(name){
+  if(!sb){ noSupabaseConfigured(); return; }
+  contentEl.innerHTML = '<div class="status">Loading...</div>';
+  try{
+    const { data, error } = await sb.from('predictions').select('*')
+      .eq('league', name).eq('resolved', true).order('match_date', { ascending: false }).limit(100);
+    if(error) throw error;
+    renderTrackRecord(summarizeTrackRecord(data || []), data || []);
+  }catch(err){
+    contentEl.innerHTML = `<div class="status">Couldn't load track record: ${err.message}</div>`;
+  }
+}
+
+// Mirrors db.summarize_track_record() in db.py — kept in sync by hand since
+// this now runs client-side against the raw `predictions` rows instead of
+// a server endpoint doing the same arithmetic.
+function summarizeTrackRecord(rows){
+  if(!rows.length) return { count: 0 };
+  let correct = 0, brierSum = 0, stakedProfit = 0, betsPlaced = 0;
+  for(const r of rows){
+    const actual = r.actual_home_goals > r.actual_away_goals ? 'Home'
+      : (r.actual_away_goals > r.actual_home_goals ? 'Away' : 'Draw');
+    const predicted = [['Home', r.predicted_home_win], ['Draw', r.predicted_draw], ['Away', r.predicted_away_win]]
+      .sort((a, b) => b[1] - a[1])[0][0];
+    if(predicted === actual) correct++;
+    const outcomeVec = { Home: [1,0,0], Draw: [0,1,0], Away: [0,0,1] }[actual];
+    const predVec = [r.predicted_home_win, r.predicted_draw, r.predicted_away_win];
+    brierSum += predVec.reduce((sum, p, i) => sum + (p - outcomeVec[i]) ** 2, 0);
+    if(r.value_bet_market){
+      betsPlaced++;
+      const won = r.value_bet_market === actual;
+      stakedProfit += won ? (r.value_bet_odds - 1) : -1;
+    }
+  }
+  return {
+    count: rows.length,
+    accuracy: Math.round((correct / rows.length) * 1000) / 1000,
+    avg_brier_score: Math.round((brierSum / rows.length) * 1000) / 1000,
+    value_bets_placed: betsPlaced,
+    value_bets_profit_units: Math.round(stakedProfit * 100) / 100,
+  };
+}
+
+async function loadParlayBoard(){
+  if(!sb){ noSupabaseConfigured(); return; }
+  contentEl.innerHTML = '<div class="status">Loading...</div>';
+  try{
+    // All leagues at once — small dataset (10 leagues × ~10 fixtures), so
+    // filtering/ranking by hint confidence happens here rather than with a
+    // second round trip or a bespoke SQL view.
+    const { data, error } = await sb.from('cached_fixtures').select('*').not('hint', 'is', null);
+    if(error) throw error;
+    const picks = (data || [])
+      .map(r => ({ ...rowToPrediction(r), league: r.league }))
+      .filter(p => p.hint)
+      .sort((a, b) => b.hint.confidence - a.hint.confidence)
+      .slice(0, 15);
+    const combined = picks.length ? picks.reduce((acc, p) => acc * p.hint.confidence, 1) : null;
+    renderParlayBoard({ picks, combined_probability_if_all_legs_selected: combined, total_candidates: (data || []).length });
+  }catch(err){
+    contentEl.innerHTML = `<div class="status">Couldn't load the parlay builder: ${err.message}</div>`;
+  }
+}
+
+function renderParlayBoard(data){
+  const picks = data.picks || [];
+  if(picks.length === 0){
+    contentEl.innerHTML = '<div class="status">No fixtures currently clear the confidence bar for a hint. Check back closer to kickoff.</div>';
+    return;
+  }
+  const rowsHtml = picks.map((p, i) => `
+    <div class="parlay-row">
+      <div class="parlay-rank">${i+1}</div>
+      <div class="parlay-body">
+        <div class="parlay-teams">${crestImg(p.home_crest, p.home)}${p.home} vs ${p.away}${crestImg(p.away_crest, p.away)}</div>
+        <div class="parlay-league">${p.league} · ${formatFixtureDate(p.date)}</div>
+        <div class="hint">💡 <b>Play ${p.hint.market}:</b> ${p.hint.selection} <span style="color:var(--muted);">(${(p.hint.confidence*100).toFixed(0)}% confidence)</span></div>
+        ${p.alternative_hint ? `<div class="alt-hint">Alternative: <b>${p.alternative_hint.market} ${p.alternative_hint.selection}</b> (${(p.alternative_hint.confidence*100).toFixed(0)}% confidence)</div>` : ''}
+      </div>
+    </div>`).join('');
+  const combined = data.combined_probability_if_all_legs_selected;
+  const noteHtml = combined != null ? `
+    <div class="parlay-note">
+      If every leg above were stacked into one parlay, the combined probability of ALL of them landing is
+      ~${(combined*100).toFixed(1)}% — no payout is shown because several of these tips (Win-or-Draw, BTTS)
+      aren't markets this app has real bookmaker odds for, and a made-up combined price would just be a
+      guess dressed up as a number. Stacking legs multiplies risk faster than reward; treat these as the
+      model's best individual picks to choose from, not a slip to bet in full.
+    </div>` : '';
+  contentEl.innerHTML = `<div class="fixture">${rowsHtml}</div>${noteHtml}`;
+}
+
+function renderTrackRecord(summary, history){
+  if(!summary || !summary.count){
+    contentEl.innerHTML = '<div class="status">No finished fixtures recorded yet for this league. Check back once a matchday has been played.</div>';
+    return;
+  }
+  const summaryHtml = `
+    <div class="summary-row">
+      <div class="stat"><div class="num">${(summary.accuracy*100).toFixed(0)}%</div><div class="lbl">Outcome accuracy</div></div>
+      <div class="stat"><div class="num">${summary.avg_brier_score}</div><div class="lbl">Avg Brier (lower=better)</div></div>
+      <div class="stat"><div class="num">${summary.value_bets_placed}</div><div class="lbl">Value bets flagged</div></div>
+      <div class="stat"><div class="num">${summary.value_bets_profit_units > 0 ? '+' : ''}${summary.value_bets_profit_units}u</div><div class="lbl">Value bet P/L (1u/bet)</div></div>
+    </div>`;
+  const rowsHtml = history.map(r => {
+    const actual = r.actual_home_goals > r.actual_away_goals ? 'Home' : (r.actual_away_goals > r.actual_home_goals ? 'Away' : 'Draw');
+    const predicted = [['Home', r.predicted_home_win], ['Draw', r.predicted_draw], ['Away', r.predicted_away_win]]
+      .sort((a,b) => b[1]-a[1])[0][0];
+    const hit = predicted === actual;
+    return `
+    <div class="tr-row">
+      <div class="tr-fixture">${r.home} ${r.actual_home_goals}-${r.actual_away_goals} ${r.away}
+        <div class="tr-result">Predicted: ${predicted} (${(Math.max(r.predicted_home_win,r.predicted_draw,r.predicted_away_win)*100).toFixed(0)}%)</div>
+      </div>
+      <div class="${hit ? 'tr-hit' : 'tr-miss'}">${hit ? '✓' : '✕'}</div>
+    </div>`;
+  }).join('');
+  contentEl.innerHTML = summaryHtml + '<div class="fixture">' + rowsHtml + '</div>';
+}
+
+function formatFixtureDate(iso){
+  const d = new Date(iso);
+  if(isNaN(d)) return iso;
+  const datePart = d.toLocaleDateString(undefined, { weekday:'short', day:'numeric', month:'short' });
+  const timePart = d.toLocaleTimeString(undefined, { hour:'2-digit', minute:'2-digit' });
+  return `${datePart} • ${timePart}`;
+}
+
+// A segment under ~7% is too narrow to hold readable text, so the number
+// moves just outside it instead of getting clipped or overlapping.
+function probSegment(pct, cls){
+  const label = `${pct.toFixed(0)}%`;
+  if(pct >= 7){
+    return `<div class="${cls}" style="width:${pct}%">${label}</div>`;
+  }
+  return `<div class="${cls}" style="width:${pct}%" title="${label}"></div>`;
+}
+
+function crestImg(url, alt){
+  if(!url) return '';
+  return `<img class="crest" src="${url}" alt="${alt}" onerror="this.style.display='none'">`;
+}
+
+function renderFixtures(predictions){
+  if(!predictions || predictions.length === 0){
+    contentEl.innerHTML = '<div class="status">No upcoming fixtures in the next 10 days for this league.</div>';
+    return;
+  }
+  contentEl.innerHTML = predictions.map(p => {
+    const homePct = p.home_win*100, drawPct = p.draw*100, awayPct = p.away_win*100;
+    // Percentages under 7% still need to be visible somewhere, so tiny ones
+    // get called out separately beneath the bar rather than lost inside it.
+    const tinyNotes = [
+      homePct < 7 ? `${p.home} ${homePct.toFixed(0)}%` : null,
+      drawPct < 7 ? `Draw ${drawPct.toFixed(0)}%` : null,
+      awayPct < 7 ? `${p.away} ${awayPct.toFixed(0)}%` : null,
+    ].filter(Boolean).join(' · ');
+    return `
+    <div class="fixture">
+      <div class="fx-date">${formatFixtureDate(p.date)}</div>
+      <div class="teams">
+        <div class="team">${crestImg(p.home_crest, p.home)}${p.home}</div>
+        <div class="score">${p.predicted_score[0]} – ${p.predicted_score[1]}</div>
+        <div class="team away">${p.away}${crestImg(p.away_crest, p.away)}</div>
+      </div>
+      <div class="probs">
+        ${probSegment(homePct, 'home')}
+        ${probSegment(drawPct, 'draw')}
+        ${probSegment(awayPct, 'away')}
+      </div>
+      ${tinyNotes ? `<div class="fx-date" style="margin-top:.4rem;margin-bottom:0;">${tinyNotes}</div>` : ''}
+      ${p.hint ? `<div class="hint">💡 <b>Play ${p.hint.market}:</b> ${p.hint.selection} <span style="color:var(--muted);">(${(p.hint.confidence*100).toFixed(0)}% confidence)</span></div>` : ''}
+      ${p.alternative_hint ? `<div class="alt-hint">Alternative: <b>${p.alternative_hint.market} ${p.alternative_hint.selection}</b> (${(p.alternative_hint.confidence*100).toFixed(0)}% confidence)</div>` : ''}
+      ${(p.value_bets||[]).map(b => `<div class="value-bet">Value bet: ${b.market} @ ${b.odds} (edge ${(b.edge*100).toFixed(1)}%)</div>`).join('')}
+    </div>
+  `;
+  }).join('');
+}
+
+renderTabs();
+if(sb) loadActive(); else noSupabaseConfigured();
+
+if('serviceWorker' in navigator){
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('sw.js').catch(() => {});
+  });
+}
+
+// Converts the VAPID public key (base64url string) into the raw byte array
+// the browser's Push API requires — this exact conversion is the standard
+// boilerplate every Web Push implementation needs.
+function urlBase64ToUint8Array(base64String){
+  const padding = '='.repeat((4 - base64String.length % 4) % 4);
+  const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
+  const rawData = window.atob(base64);
+  return Uint8Array.from([...rawData].map(c => c.charCodeAt(0)));
+}
+
+// The VAPID public key is meant to be public (it's how a browser verifies
+// push messages really came from your server) — set it to the same value
+// as your VAPID_PUBLIC_KEY environment variable so this page doesn't need
+// a live API call just to fetch it.
+const VAPID_PUBLIC_KEY = 'YOUR-VAPID-PUBLIC-KEY';
+
+const notifyBtn = document.getElementById('notifyBtn');
+notifyBtn.addEventListener('click', async () => {
+  if(!sb){ alert('Set up Supabase (see top of this file) before enabling notifications.'); return; }
+  if(VAPID_PUBLIC_KEY.includes('YOUR-VAPID')){ alert('Push is not configured yet — set VAPID_PUBLIC_KEY near the bottom of this file.'); return; }
+  if(!('serviceWorker' in navigator) || !('PushManager' in window)){
+    alert('Push notifications are not supported in this browser.');
+    return;
+  }
+  try{
+    notifyBtn.textContent = 'Requesting permission...';
+    const permission = await Notification.requestPermission();
+    if(permission !== 'granted'){
+      notifyBtn.textContent = '🔔 Enable value-bet notifications';
+      alert('Notification permission was not granted.');
+      return;
+    }
+    const reg = await navigator.serviceWorker.ready;
+    const subscription = await reg.pushManager.subscribe({
+      userVisibleOnly: true,
+      applicationServerKey: urlBase64ToUint8Array(VAPID_PUBLIC_KEY),
+    });
+    // Written straight into Supabase (push_subscriptions table) instead of
+    // POSTing to a Render endpoint. RLS on this table allows INSERT only,
+    // no SELECT/UPDATE/DELETE — a visitor can register themselves but can
+    // never read or tamper with anyone else's subscription. engine.py reads
+    // this table (via the DATABASE_URL connection, which bypasses RLS) when
+    // it sends notifications during a scheduled refresh.
+    const sub = subscription.toJSON();
+    const { error } = await sb.from('push_subscriptions').insert({
+      endpoint: sub.endpoint, p256dh: sub.keys.p256dh, auth: sub.keys.auth,
+    });
+    if(error && error.code !== '23505') throw error;  // 23505 = already subscribed, fine
+    notifyBtn.textContent = '✅ Notifications enabled';
+    notifyBtn.disabled = true;
+  }catch(err){
+    notifyBtn.textContent = '🔔 Enable value-bet notifications';
+    alert(`Couldn't enable notifications: ${err.message}`);
+  }
+});
+</script>
+</body>
+</html>
