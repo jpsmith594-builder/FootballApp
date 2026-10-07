@@ -109,27 +109,6 @@ def generate_hint(home: str, away: str, win_draw_away_probs: dict, btts_yes: flo
 
     return None
 
-
-def generate_alternative_bet(primary_hint: dict, btts_yes: float, btts_no: float):
-    """
-    A second, supplementary line shown below the primary hint: BTTS Yes or
-    No, whichever side the model actually favors, with its own confidence —
-    always shown, with no minimum-confidence bar. Unlike generate_hint()
-    above, this isn't a "here's what to play" recommendation gated by
-    confidence; it's just the model's BTTS read laid out for the user to
-    weigh themselves, since BTTS answers a different question (will BOTH
-    sides score) than who wins, and is often worth seeing alongside the
-    primary pick rather than only when it happens to win the priority order.
-
-    Returns None only when the primary hint's market is already "BTTS" —
-    showing the identical pick twice would be redundant, not alternative.
-    """
-    if primary_hint and primary_hint["market"] == "BTTS":
-        return None
-    if btts_yes >= btts_no:
-        return {"market": "BTTS", "selection": "Yes", "confidence": round(btts_yes, 3)}
-    return {"market": "BTTS", "selection": "No", "confidence": round(btts_no, 3)}
-
 app = FastAPI(title="Matchday Predictor API")
 
 # Allow any frontend to call this — tighten to your actual frontend's domain
@@ -150,11 +129,6 @@ def refresh_league(league_name: str):
         results = client.get_results(league_code, days_back=RESULTS_DAYS_BACK)
         model = DixonColesModel()
         model.fit(results)
-        # Teams with a thin sample (newly promoted sides, mainly) get pulled
-        # toward a below-average "newcomer" prior rather than trusted at
-        # face value — see poisson_model.apply_promoted_team_shrinkage's
-        # docstring for why. No-op for any team with enough matches already.
-        model.apply_promoted_team_shrinkage(results)
         elo = EloModel()
         elo.fit(results)
         adjustments = db.get_team_adjustments(league_name)
@@ -218,8 +192,6 @@ def refresh_league(league_name: str):
                 "value_bets": value_bets,
                 "hint": generate_hint(fx.home, fx.away, display_probs, pred["btts_yes"], pred["btts_no"]),
             }
-            entry["alternative_hint"] = generate_alternative_bet(
-                entry["hint"], pred["btts_yes"], pred["btts_no"])
             predictions.append(entry)
 
             # Record for the track record tab. Uses the ensembled model view,
@@ -302,21 +274,6 @@ def get_track_record(league_name: str):
         raise HTTPException(404, f"Unknown league. Choose from: {list(LEAGUES.keys())}")
     rows = db.get_track_record(league_name)
     return {"league": league_name, "summary": db.summarize_track_record(rows), "history": rows}
-
-
-@app.get("/calibration/{league_name}")
-def get_calibration(league_name: str):
-    """
-    Transparency feature: shows whether the model's stated confidence can
-    actually be trusted, using your own accumulated track record (see
-    db.get_calibration_curve's docstring for the full explanation). This is
-    the kind of honesty a paying customer should be able to check for
-    themselves rather than take on faith — surfacing it in the app, not
-    just internally, is deliberate.
-    """
-    if league_name not in LEAGUES:
-        raise HTTPException(404, f"Unknown league. Choose from: {list(LEAGUES.keys())}")
-    return db.get_calibration_curve(league_name)
 
 
 def _check_admin(x_admin_secret: str = Header(default="")):
