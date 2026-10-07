@@ -9,6 +9,7 @@
 <link rel="apple-touch-icon" href="icon-192.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Oswald:wght@500;600;700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <style>
   :root{ --pitch:#0E3B2E; --chalk:#F3F1EA; --ink:#0B1A15; --amber:#E8A23D; --line:rgba(243,241,234,0.14); --muted:#9FB3AA; }
   *{box-sizing:border-box;}
@@ -61,9 +62,6 @@
 </head>
 <body>
 <header><h1>Matchday</h1><p style="margin:0;color:var(--muted);font-size:.85rem;">Live predictions from your model</p></header>
-<div id="config">
-  API base URL: <input id="apiBase" placeholder="https://your-app.onrender.com" />
-</div>
 <div class="view-switch">
   <button class="view-btn active" id="viewFixtures">Fixtures</button>
   <button class="view-btn" id="viewParlay">Parlay Builder</button>
@@ -79,17 +77,23 @@ const leagues = ["Premier League","La Liga","Serie A","Bundesliga","Ligue 1",
 let active = leagues[0];
 const tabsEl = document.getElementById('tabs');
 const contentEl = document.getElementById('content');
-const apiInput = document.getElementById('apiBase');
 
-// Remembers your API URL in this browser only — not sent anywhere else.
-// Defaults to the shared backend so friends don't need to know or enter
-// any URL themselves — they can still override it here if they ever want to.
-const DEFAULT_API_BASE = 'https://footballapp-1-9nbe.onrender.com';
-apiInput.value = localStorage.getItem('matchday_api_base') || DEFAULT_API_BASE;
-apiInput.addEventListener('change', () => {
-  localStorage.setItem('matchday_api_base', apiInput.value.trim());
-  loadLeague(active);
-});
+// Reads straight out of Supabase instead of calling a Render API — no
+// server to cold-start, no waiting for a model fit. engine.py (run on a
+// schedule by refresh_cache.py / GitHub Actions, NOT by this page) is what
+// keeps these tables fresh; this page only ever reads them.
+//
+// The anon key below is meant to be public — it's the same key Supabase's
+// own client-side docs tell you to ship in a browser. It can only do what
+// Row Level Security on each table allows: SELECT on cached_fixtures,
+// refresh_meta and predictions, and INSERT-only on push_subscriptions (see
+// DEPLOY.md for the exact policies). It can never read or change anything
+// else in your database.
+const SUPABASE_URL = 'https://YOUR-PROJECT-REF.supabase.co';
+const SUPABASE_ANON_KEY = 'YOUR-ANON-PUBLIC-KEY';
+const sb = (SUPABASE_URL.includes('YOUR-PROJECT-REF') || !window.supabase)
+  ? null
+  : window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 let view = 'fixtures'; // 'fixtures' | 'parlay' | 'trackrecord'
 const viewFixturesBtn = document.getElementById('viewFixtures');
@@ -127,43 +131,97 @@ function renderTabs(){
   });
 }
 
+function noSupabaseConfigured(){
+  contentEl.innerHTML = `<div class="status">Set SUPABASE_URL and SUPABASE_ANON_KEY near the top of this file's &lt;script&gt; block
+    (Supabase dashboard → Project Settings → API) to connect this page to your data.</div>`;
+}
+
 async function loadLeague(name){
-  const base = apiInput.value.trim().replace(/\/$/, '');
-  if(!base){ contentEl.innerHTML = '<div class="status">Enter your API URL above to load live predictions.</div>'; return; }
+  if(!sb){ noSupabaseConfigured(); return; }
   contentEl.innerHTML = '<div class="status">Loading...</div>';
   try{
-    const res = await fetch(`${base}/predictions/${encodeURIComponent(name)}`);
-    if(!res.ok) throw new Error(`API returned ${res.status}`);
-    const data = await res.json();
-    renderFixtures(data.predictions);
+    const { data, error } = await sb.from('cached_fixtures').select('*')
+      .eq('league', name).order('match_date', { ascending: true });
+    if(error) throw error;
+    renderFixtures((data || []).map(rowToPrediction));
   }catch(err){
-    contentEl.innerHTML = `<div class="status">Couldn't load predictions: ${err.message}<br>Check the API URL and that your backend is deployed and awake.</div>`;
+    contentEl.innerHTML = `<div class="status">Couldn't load predictions: ${err.message}<br>Check your Supabase URL/key and that refresh_cache.py has run at least once.</div>`;
   }
 }
 
+// Maps a cached_fixtures row (flat SQL columns) back into the same shape
+// renderFixtures() was already written against (predicted_score as a pair,
+// etc.) — keeps the rendering code below unchanged either way data arrives.
+function rowToPrediction(r){
+  return {
+    home: r.home, away: r.away, date: r.match_date,
+    home_crest: r.home_crest, away_crest: r.away_crest,
+    home_win: r.home_win, draw: r.draw, away_win: r.away_win,
+    predicted_score: [r.predicted_score_home, r.predicted_score_away],
+    over_2_5: r.over_2_5, btts_yes: r.btts_yes,
+    value_bets: r.value_bets || [], hint: r.hint, alternative_hint: r.alternative_hint,
+  };
+}
+
 async function loadTrackRecord(name){
-  const base = apiInput.value.trim().replace(/\/$/, '');
-  if(!base){ contentEl.innerHTML = '<div class="status">Enter your API URL above to load the track record.</div>'; return; }
+  if(!sb){ noSupabaseConfigured(); return; }
   contentEl.innerHTML = '<div class="status">Loading...</div>';
   try{
-    const res = await fetch(`${base}/track-record/${encodeURIComponent(name)}`);
-    if(!res.ok) throw new Error(`API returned ${res.status}`);
-    const data = await res.json();
-    renderTrackRecord(data.summary, data.history);
+    const { data, error } = await sb.from('predictions').select('*')
+      .eq('league', name).eq('resolved', true).order('match_date', { ascending: false }).limit(100);
+    if(error) throw error;
+    renderTrackRecord(summarizeTrackRecord(data || []), data || []);
   }catch(err){
     contentEl.innerHTML = `<div class="status">Couldn't load track record: ${err.message}</div>`;
   }
 }
 
+// Mirrors db.summarize_track_record() in db.py — kept in sync by hand since
+// this now runs client-side against the raw `predictions` rows instead of
+// a server endpoint doing the same arithmetic.
+function summarizeTrackRecord(rows){
+  if(!rows.length) return { count: 0 };
+  let correct = 0, brierSum = 0, stakedProfit = 0, betsPlaced = 0;
+  for(const r of rows){
+    const actual = r.actual_home_goals > r.actual_away_goals ? 'Home'
+      : (r.actual_away_goals > r.actual_home_goals ? 'Away' : 'Draw');
+    const predicted = [['Home', r.predicted_home_win], ['Draw', r.predicted_draw], ['Away', r.predicted_away_win]]
+      .sort((a, b) => b[1] - a[1])[0][0];
+    if(predicted === actual) correct++;
+    const outcomeVec = { Home: [1,0,0], Draw: [0,1,0], Away: [0,0,1] }[actual];
+    const predVec = [r.predicted_home_win, r.predicted_draw, r.predicted_away_win];
+    brierSum += predVec.reduce((sum, p, i) => sum + (p - outcomeVec[i]) ** 2, 0);
+    if(r.value_bet_market){
+      betsPlaced++;
+      const won = r.value_bet_market === actual;
+      stakedProfit += won ? (r.value_bet_odds - 1) : -1;
+    }
+  }
+  return {
+    count: rows.length,
+    accuracy: Math.round((correct / rows.length) * 1000) / 1000,
+    avg_brier_score: Math.round((brierSum / rows.length) * 1000) / 1000,
+    value_bets_placed: betsPlaced,
+    value_bets_profit_units: Math.round(stakedProfit * 100) / 100,
+  };
+}
+
 async function loadParlayBoard(){
-  const base = apiInput.value.trim().replace(/\/$/, '');
-  if(!base){ contentEl.innerHTML = '<div class="status">Enter your API URL above to load the parlay builder.</div>'; return; }
+  if(!sb){ noSupabaseConfigured(); return; }
   contentEl.innerHTML = '<div class="status">Loading...</div>';
   try{
-    const res = await fetch(`${base}/parlay-builder`);
-    if(!res.ok) throw new Error(`API returned ${res.status}`);
-    const data = await res.json();
-    renderParlayBoard(data);
+    // All leagues at once — small dataset (10 leagues × ~10 fixtures), so
+    // filtering/ranking by hint confidence happens here rather than with a
+    // second round trip or a bespoke SQL view.
+    const { data, error } = await sb.from('cached_fixtures').select('*').not('hint', 'is', null);
+    if(error) throw error;
+    const picks = (data || [])
+      .map(r => ({ ...rowToPrediction(r), league: r.league }))
+      .filter(p => p.hint)
+      .sort((a, b) => b.hint.confidence - a.hint.confidence)
+      .slice(0, 15);
+    const combined = picks.length ? picks.reduce((acc, p) => acc * p.hint.confidence, 1) : null;
+    renderParlayBoard({ picks, combined_probability_if_all_legs_selected: combined, total_candidates: (data || []).length });
   }catch(err){
     contentEl.innerHTML = `<div class="status">Couldn't load the parlay builder: ${err.message}</div>`;
   }
@@ -285,7 +343,7 @@ function renderFixtures(predictions){
 }
 
 renderTabs();
-if(apiInput.value) loadActive();
+if(sb) loadActive(); else noSupabaseConfigured();
 
 if('serviceWorker' in navigator){
   window.addEventListener('load', () => {
@@ -303,10 +361,16 @@ function urlBase64ToUint8Array(base64String){
   return Uint8Array.from([...rawData].map(c => c.charCodeAt(0)));
 }
 
+// The VAPID public key is meant to be public (it's how a browser verifies
+// push messages really came from your server) — set it to the same value
+// as your VAPID_PUBLIC_KEY environment variable so this page doesn't need
+// a live API call just to fetch it.
+const VAPID_PUBLIC_KEY = 'YOUR-VAPID-PUBLIC-KEY';
+
 const notifyBtn = document.getElementById('notifyBtn');
 notifyBtn.addEventListener('click', async () => {
-  const base = apiInput.value.trim().replace(/\/$/, '');
-  if(!base){ alert('Enter your API URL first.'); return; }
+  if(!sb){ alert('Set up Supabase (see top of this file) before enabling notifications.'); return; }
+  if(VAPID_PUBLIC_KEY.includes('YOUR-VAPID')){ alert('Push is not configured yet — set VAPID_PUBLIC_KEY near the bottom of this file.'); return; }
   if(!('serviceWorker' in navigator) || !('PushManager' in window)){
     alert('Push notifications are not supported in this browser.');
     return;
@@ -319,23 +383,22 @@ notifyBtn.addEventListener('click', async () => {
       alert('Notification permission was not granted.');
       return;
     }
-    const keyRes = await fetch(`${base}/push/vapid-public-key`);
-    const { publicKey } = await keyRes.json();
-    if(!publicKey){
-      notifyBtn.textContent = '🔔 Enable value-bet notifications';
-      alert('Push is not configured on the backend yet (missing VAPID keys).');
-      return;
-    }
     const reg = await navigator.serviceWorker.ready;
     const subscription = await reg.pushManager.subscribe({
       userVisibleOnly: true,
-      applicationServerKey: urlBase64ToUint8Array(publicKey),
+      applicationServerKey: urlBase64ToUint8Array(VAPID_PUBLIC_KEY),
     });
-    await fetch(`${base}/push/subscribe`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(subscription.toJSON()),
+    // Written straight into Supabase (push_subscriptions table) instead of
+    // POSTing to a Render endpoint. RLS on this table allows INSERT only,
+    // no SELECT/UPDATE/DELETE — a visitor can register themselves but can
+    // never read or tamper with anyone else's subscription. engine.py reads
+    // this table (via the DATABASE_URL connection, which bypasses RLS) when
+    // it sends notifications during a scheduled refresh.
+    const sub = subscription.toJSON();
+    const { error } = await sb.from('push_subscriptions').insert({
+      endpoint: sub.endpoint, p256dh: sub.keys.p256dh, auth: sub.keys.auth,
     });
+    if(error && error.code !== '23505') throw error;  // 23505 = already subscribed, fine
     notifyBtn.textContent = '✅ Notifications enabled';
     notifyBtn.disabled = true;
   }catch(err){
