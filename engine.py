@@ -27,6 +27,7 @@ from data_fetcher import FootballDataClient, LEAGUES
 from poisson_model import DixonColesModel, blend_with_market
 from elo_model import EloModel, ensemble as elo_ensemble
 from value_bet import fetch_odds, find_value_bets, devig
+import calibration
 import db
 import push
 
@@ -137,6 +138,11 @@ def refresh_league(league_name: str):
         elo.fit(results)
         adjustments = db.get_team_adjustments(league_name)
         fixtures = client.get_upcoming_fixtures(league_code, days_ahead=10)
+        # Built once per league per refresh (not per fixture) — it's the
+        # same correction curve for every fixture in this league this run.
+        # See calibration.py for why this only touches what's displayed,
+        # not value-bet detection or the track record.
+        correction_fn = calibration.build_correction(league_name)
 
         odds_by_fixture = {}
         if ODDS_ENABLED:
@@ -166,10 +172,20 @@ def refresh_league(league_name: str):
             model_view = {**pred, "home_win": ensembled["home_win"],
                           "draw": ensembled["draw"], "away_win": ensembled["away_win"]}
 
+            # Calibration-corrected view, for DISPLAY only — find_value_bets()
+            # below still runs against the raw `model_view`, and so does the
+            # track record recording further down. See calibration.py.
+            calibrated = calibration.apply_correction(
+                {"home_win": model_view["home_win"], "draw": model_view["draw"],
+                 "away_win": model_view["away_win"]},
+                correction_fn,
+            )
+            calibrated_view = {**model_view, **calibrated}
+
             quote = odds_by_fixture.get((fx.home, fx.away))
             value_bets = []
-            display_probs = {"home_win": model_view["home_win"], "draw": model_view["draw"],
-                              "away_win": model_view["away_win"]}
+            display_probs = {"home_win": calibrated_view["home_win"], "draw": calibrated_view["draw"],
+                              "away_win": calibrated_view["away_win"]}
 
             if quote:
                 bets = find_value_bets(f"{fx.home} vs {fx.away}", model_view, quote)
@@ -178,10 +194,13 @@ def refresh_league(league_name: str):
                      "kelly_stake": round(b.kelly_stake, 4)}
                     for b in bets
                 ]
-                # Blend for DISPLAY only. find_value_bets() above already ran
-                # against the raw, unblended `model_view` — order matters here.
+                # Blend for DISPLAY only, and blend the CALIBRATED view (not
+                # the raw one) with the market — find_value_bets() above
+                # already ran against the raw, unblended `model_view`, so
+                # which view feeds display here doesn't affect value-bet
+                # detection either way.
                 fair_h, fair_d, fair_a = devig(quote.home_odds, quote.draw_odds, quote.away_odds)
-                display_probs = blend_with_market(model_view, fair_h, fair_d, fair_a, weight=BLEND_WEIGHT)
+                display_probs = blend_with_market(calibrated_view, fair_h, fair_d, fair_a, weight=BLEND_WEIGHT)
 
             entry = {
                 "home": fx.home, "away": fx.away, "date": fx.date,
