@@ -10,16 +10,22 @@ name: Refresh predictions cache
 # full cold-start + model-fit cost on every ping, it just paid it on a
 # schedule instead of when a user showed up. Running the script directly in
 # a GitHub Actions runner has no server to wake up at all.
+#
+# Every 6 hours, not hourly: team ratings only move meaningfully once a
+# match actually finishes, so there's no real accuracy cost to this, and it
+# keeps this workflow comfortably inside GitHub's free 2,000 minutes/month
+# for private repos (hourly was ~3x over budget on its own). League tables
+# refresh on their own, lighter schedule — see refresh_standings.yml.
 
 on:
   schedule:
-    - cron: "7 * * * *"  # a few minutes past the hour, every hour (UTC)
+    - cron: "7 */6 * * *"  # a few minutes past the hour, every 6 hours (UTC)
   workflow_dispatch: {}  # lets you trigger it manually from the Actions tab
 
 jobs:
   refresh:
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 

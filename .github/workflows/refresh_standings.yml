@@ -1,0 +1,35 @@
+name: Refresh league tables
+
+# Split out from refresh.yml deliberately: a league table only changes after
+# matches actually finish (once or twice a week per team), not hourly, so
+# refreshing it on the same cadence as predictions would waste GitHub
+# Actions minutes and football-data.org request budget for no benefit. See
+# engine.refresh_standings()'s docstring for the same reasoning.
+#
+# Twice a day is plenty — standings are display-only and nobody needs
+# minute-fresh league positions.
+
+on:
+  schedule:
+    - cron: "20 3,15 * * *"  # 03:20 and 15:20 UTC
+  workflow_dispatch: {}  # lets you trigger it manually from the Actions tab
+
+jobs:
+  refresh-standings:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run refresh_standings.py
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          FOOTBALL_DATA_API_KEY: ${{ secrets.FOOTBALL_DATA_API_KEY }}
+        run: python refresh_standings.py
