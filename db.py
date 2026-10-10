@@ -72,6 +72,18 @@ predictions = Table(
     Column("value_bet_market", String, nullable=True),
     Column("value_bet_odds", Float, nullable=True),
     Column("value_bet_edge", Float, nullable=True),
+    # The "what to play" hint shown on the fixture card (engine.generate_hint),
+    # frozen at recording time just like everything else above — so the Hint
+    # Accuracy tab grades the tip as it was actually shown, not a version
+    # recomputed with hindsight. hint_side is a normalized grading key
+    # ("Home"/"Away"/"HomeOrDraw"/"AwayOrDraw"/"BTTS_YES"/"BTTS_NO") derived
+    # from market+selection at record time, so grading never has to re-parse
+    # a free-text selection string like "Arsenal or Draw". Null on fixtures
+    # where no hint cleared its confidence bar.
+    Column("hint_market", String, nullable=True),
+    Column("hint_selection", String, nullable=True),
+    Column("hint_side", String, nullable=True),
+    Column("hint_confidence", Float, nullable=True),
     Column("actual_home_goals", Integer, nullable=True),
     Column("actual_away_goals", Integer, nullable=True),
     Column("resolved", Boolean, default=False),
@@ -115,6 +127,28 @@ refresh_meta = Table(
     Column("league", String, primary_key=True),
     Column("fitted_at", DateTime),
     Column("fixture_count", Integer),
+)
+
+# League table, straight from football-data.org — not derived from
+# anything the prediction model computes, just a display convenience.
+# Same wholesale-replace pattern as cached_fixtures: a table is always the
+# complete current picture, never something to merge row-by-row.
+standings = Table(
+    "standings", metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("league", String, nullable=False),
+    Column("position", Integer),
+    Column("team", String, nullable=False),
+    Column("crest", String, nullable=True),
+    Column("played", Integer),
+    Column("won", Integer),
+    Column("drawn", Integer),
+    Column("lost", Integer),
+    Column("goals_for", Integer),
+    Column("goals_against", Integer),
+    Column("goal_difference", Integer),
+    Column("points", Integer),
+    Column("updated_at", DateTime),
 )
 
 metadata.create_all(engine)
@@ -162,6 +196,36 @@ def replace_cached_fixtures(league: str, predictions: list, fitted_at: str):
             ))
 
 
+def replace_standings(league: str, rows: list):
+    """Wholesale replace of one league's table — see replace_cached_fixtures
+    for why delete-then-reinsert beats a row-by-row upsert here too."""
+    with engine.begin() as conn:
+        conn.execute(delete(standings).where(standings.c.league == league))
+        if rows:
+            conn.execute(insert(standings), [
+                {
+                    "league": league, "position": r["position"], "team": r["team"],
+                    "crest": r.get("crest"), "played": r["played"], "won": r["won"],
+                    "drawn": r["drawn"], "lost": r["lost"],
+                    "goals_for": r["goals_for"], "goals_against": r["goals_against"],
+                    "goal_difference": r["goal_difference"], "points": r["points"],
+                    "updated_at": datetime.now(timezone.utc),
+                }
+                for r in rows
+            ])
+
+
+def get_standings(league: str) -> list:
+    """Local-dev/testing convenience — the deployed frontend reads this same
+    table directly via the Supabase client instead of going through Python."""
+    with engine.begin() as conn:
+        rows = conn.execute(
+            select(standings).where(standings.c.league == league)
+            .order_by(standings.c.position.asc())
+        ).mappings().all()
+    return [dict(r) for r in rows]
+
+
 def get_cached_fixtures(league: str) -> list:
     """Local-dev/testing convenience — the deployed frontend reads this same
     table directly via the Supabase client instead of going through Python."""
@@ -174,7 +238,7 @@ def get_cached_fixtures(league: str) -> list:
 
 
 def record_prediction(league: str, home: str, away: str, match_date: str, pred: dict,
-                       value_bet: dict = None) -> bool:
+                       value_bet: dict = None, hint: dict = None) -> bool:
     """Insert a prediction only if this exact fixture hasn't been recorded
     yet. This is what keeps the track record honest — once stored, a later
     refresh must never overwrite it, or the app could quietly 're-predict'
@@ -202,6 +266,10 @@ def record_prediction(league: str, home: str, away: str, match_date: str, pred: 
             value_bet_market=value_bet["market"] if value_bet else None,
             value_bet_odds=value_bet["odds"] if value_bet else None,
             value_bet_edge=value_bet["edge"] if value_bet else None,
+            hint_market=hint["market"] if hint else None,
+            hint_selection=hint["selection"] if hint else None,
+            hint_side=hint.get("side") if hint else None,
+            hint_confidence=hint["confidence"] if hint else None,
             resolved=False,
             recorded_at=datetime.now(timezone.utc),
         ))
@@ -235,6 +303,78 @@ def get_track_record(league: str, limit: int = 100) -> list:
             )).order_by(predictions.c.match_date.desc()).limit(limit)
         ).mappings().all()
     return [dict(r) for r in rows]
+
+
+def get_hint_track_record(league: str, limit: int = 100) -> list:
+    """Same resolved-fixtures table as get_track_record(), but only the rows
+    where a hint actually fired — this is what the Hint Accuracy tab reads."""
+    with engine.begin() as conn:
+        rows = conn.execute(
+            select(predictions).where(and_(
+                predictions.c.league == league,
+                predictions.c.resolved == True,  # noqa: E712
+                predictions.c.hint_market.isnot(None),
+            )).order_by(predictions.c.match_date.desc()).limit(limit)
+        ).mappings().all()
+    return [dict(r) for r in rows]
+
+
+def _hint_hit(hint_side: str, actual: str, btts_actual: bool):
+    """Grades one resolved row's hint against what actually happened.
+    Returns None (ungraded, not wrong) for a row with no recognized side —
+    e.g. a prediction recorded before hint_side existed — so it's excluded
+    from the count rather than silently scored as a miss."""
+    if hint_side == "Home":
+        return actual == "Home"
+    if hint_side == "Away":
+        return actual == "Away"
+    if hint_side == "HomeOrDraw":
+        return actual in ("Home", "Draw")
+    if hint_side == "AwayOrDraw":
+        return actual in ("Away", "Draw")
+    if hint_side == "BTTS_YES":
+        return btts_actual
+    if hint_side == "BTTS_NO":
+        return not btts_actual
+    return None
+
+
+def summarize_hint_track_record(rows: list) -> dict:
+    """
+    Unlike summarize_track_record() (which grades the single highest-
+    probability outcome, always), this grades the actual "what to play" tip
+    that was shown — and reports accuracy per market separately rather than
+    one blended number, because Straight Win, Win or Draw, and BTTS have
+    very different natural hit rates (Win or Draw covers more outcomes, so
+    it SHOULD hit more often — mixing them into one accuracy figure would
+    just be misleading, not more informative). See generate_hint()'s
+    docstring for the same reasoning applied to how hints are chosen.
+    """
+    by_market: dict = {}
+    overall_hits = 0
+    graded = 0
+    for r in rows:
+        hg, ag = r["actual_home_goals"], r["actual_away_goals"]
+        actual = "Home" if hg > ag else ("Away" if ag > hg else "Draw")
+        btts_actual = hg > 0 and ag > 0
+        hit = _hint_hit(r.get("hint_side"), actual, btts_actual)
+        if hit is None:
+            continue
+        graded += 1
+        if hit:
+            overall_hits += 1
+        m = by_market.setdefault(r["hint_market"], {"correct": 0, "total": 0})
+        m["total"] += 1
+        if hit:
+            m["correct"] += 1
+    return {
+        "count": graded,
+        "accuracy": round(overall_hits / graded, 3) if graded else None,
+        "by_market": {
+            market: {"count": m["total"], "accuracy": round(m["correct"] / m["total"], 3)}
+            for market, m in by_market.items()
+        },
+    }
 
 
 def set_team_adjustment(league: str, team: str, goal_multiplier: float, note: str = None):

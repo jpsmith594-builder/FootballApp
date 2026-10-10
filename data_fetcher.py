@@ -100,6 +100,35 @@ class FootballDataClient:
             ))
         return matches
 
+    def get_standings(self, league_code: str) -> List[dict]:
+        """Current league table — position, points, goal difference, etc.
+        Purely for display; the prediction model never reads this. Only
+        handles the flat "TOTAL" table that a domestic league returns —
+        Champions League (and other group-stage competitions) return a
+        different, per-group shape, so callers should skip this for those
+        competitions rather than rely on it here."""
+        data = self._get(f"/competitions/{league_code}/standings")
+        total = next((s for s in data.get("standings", []) if s.get("type") == "TOTAL"), None)
+        if not total:
+            return []
+        rows = []
+        for row in total.get("table", []):
+            team = row.get("team", {})
+            rows.append({
+                "position": row.get("position"),
+                "team": team.get("name"),
+                "crest": team.get("crest"),
+                "played": row.get("playedGames"),
+                "won": row.get("won"),
+                "drawn": row.get("draw"),
+                "lost": row.get("lost"),
+                "goals_for": row.get("goalsFor"),
+                "goals_against": row.get("goalsAgainst"),
+                "goal_difference": row.get("goalDifference"),
+                "points": row.get("points"),
+            })
+        return rows
+
     def get_upcoming_fixtures(self, league_code: str, days_ahead: int = 10) -> List[Match]:
         """Scheduled matches to generate predictions for."""
         date_from = datetime.utcnow().strftime("%Y-%m-%d")

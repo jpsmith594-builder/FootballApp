@@ -73,22 +73,28 @@ def generate_hint(home: str, away: str, win_draw_away_probs: dict, btts_yes: flo
     draw = win_draw_away_probs["draw"]
     away_win = win_draw_away_probs["away_win"]
 
+    # "side" is a normalized grading key the Hint Accuracy tab uses to check
+    # this tip against the real result later, without having to re-parse a
+    # free-text `selection` string like "Arsenal or Draw" months from now —
+    # it isn't shown anywhere in the UI, just carried through to db.py.
     if home_win >= HINT_STRAIGHT_WIN_MIN and home_win >= away_win:
-        return {"market": "Straight Win", "selection": home, "confidence": round(home_win, 3)}
+        return {"market": "Straight Win", "selection": home, "confidence": round(home_win, 3), "side": "Home"}
     if away_win >= HINT_STRAIGHT_WIN_MIN and away_win > home_win:
-        return {"market": "Straight Win", "selection": away, "confidence": round(away_win, 3)}
+        return {"market": "Straight Win", "selection": away, "confidence": round(away_win, 3), "side": "Away"}
 
     double_chance_1x = home_win + draw
     double_chance_x2 = away_win + draw
     if double_chance_1x >= HINT_WIN_OR_DRAW_MIN and double_chance_1x >= double_chance_x2:
-        return {"market": "Win or Draw", "selection": f"{home} or Draw", "confidence": round(double_chance_1x, 3)}
+        return {"market": "Win or Draw", "selection": f"{home} or Draw",
+                "confidence": round(double_chance_1x, 3), "side": "HomeOrDraw"}
     if double_chance_x2 >= HINT_WIN_OR_DRAW_MIN and double_chance_x2 > double_chance_1x:
-        return {"market": "Win or Draw", "selection": f"{away} or Draw", "confidence": round(double_chance_x2, 3)}
+        return {"market": "Win or Draw", "selection": f"{away} or Draw",
+                "confidence": round(double_chance_x2, 3), "side": "AwayOrDraw"}
 
     if btts_yes >= HINT_BTTS_MIN and btts_yes >= btts_no:
-        return {"market": "BTTS", "selection": "Yes", "confidence": round(btts_yes, 3)}
+        return {"market": "BTTS", "selection": "Yes", "confidence": round(btts_yes, 3), "side": "BTTS_YES"}
     if btts_no >= HINT_BTTS_MIN and btts_no > btts_yes:
-        return {"market": "BTTS", "selection": "No", "confidence": round(btts_no, 3)}
+        return {"market": "BTTS", "selection": "No", "confidence": round(btts_no, 3), "side": "BTTS_NO"}
 
     return None
 
@@ -120,6 +126,12 @@ def generate_alternative_bet(primary_hint: dict, btts_yes: float, btts_no: float
 # module writes to as part of refresh_league() below.
 _cache: dict = {}
 
+# Competitions whose standings aren't a single flat domestic-style table —
+# Champions League is group/league-phase, a different shape entirely (see
+# FootballDataClient.get_standings's docstring). Skipped rather than
+# mishandled; add others here if a future league turns out the same way.
+STANDINGS_SKIP_LEAGUES = {"Champions League"}
+
 
 def refresh_league(league_name: str):
     league_code = LEAGUES[league_name]
@@ -127,6 +139,16 @@ def refresh_league(league_name: str):
     try:
         client = FootballDataClient()
         results = client.get_results(league_code, days_back=RESULTS_DAYS_BACK)
+
+        # Pure display data — never feeds the model — so it's fetched and
+        # written independently, with its own try/except: a standings hiccup
+        # should never block predictions from refreshing.
+        if league_name not in STANDINGS_SKIP_LEAGUES:
+            try:
+                table_rows = client.get_standings(league_code)
+                db.replace_standings(league_name, table_rows)
+            except Exception as e:
+                log.warning(f"Could not refresh standings for {league_name}: {e}")
         model = DixonColesModel()
         model.fit(results)
         # Teams with a thin sample (newly promoted sides, mainly) get pulled
@@ -224,7 +246,7 @@ def refresh_league(league_name: str):
             # your model(s), not a moving target of model+market averages.
             try:
                 was_new = db.record_prediction(league_name, fx.home, fx.away, fx.date, model_view,
-                                                value_bets[0] if value_bets else None)
+                                                value_bets[0] if value_bets else None, entry["hint"])
                 # Only notify the FIRST time this fixture's value bet is
                 # recorded — otherwise every refresh re-fires it.
                 if was_new and value_bets:

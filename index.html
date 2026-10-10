@@ -52,6 +52,16 @@
   .tr-fixture{flex:1;}
   .tr-result{color:var(--muted); font-size:.78rem;}
   .tr-hit{color:var(--amber);} .tr-miss{color:var(--coral);}
+
+  .league-table{width:100%; border-collapse:collapse; font-size:.82rem;}
+  .league-table th{text-align:left; color:var(--muted); font-weight:500; font-size:.72rem; text-transform:uppercase; letter-spacing:.03em; padding:.4rem .4rem; border-bottom:1px solid var(--line);}
+  .league-table td{padding:.5rem .4rem; border-bottom:1px solid var(--line); white-space:nowrap;}
+  .league-table tr:last-child td{border-bottom:none;}
+  .league-table .lt-pos{color:var(--muted); width:1.6rem;}
+  .league-table .lt-team{display:flex; align-items:center; gap:.4rem; white-space:normal;}
+  .league-table .lt-crest{width:18px; height:18px; object-fit:contain;}
+  .league-table .lt-num{text-align:center;}
+  .league-table .lt-pts{text-align:center; font-family:'Oswald',sans-serif; color:var(--amber);}
   .parlay-row{display:flex; gap:.7rem; align-items:flex-start; padding:.8rem 0; border-bottom:1px solid var(--line);}
   .parlay-row:last-child{border-bottom:none;}
   .parlay-rank{font-family:'Oswald',sans-serif; font-size:1.1rem; color:var(--amber); flex:0 0 1.6rem;}
@@ -67,6 +77,8 @@
   <button class="view-btn active" id="viewFixtures">Fixtures</button>
   <button class="view-btn" id="viewParlay">Parlay Builder</button>
   <button class="view-btn" id="viewTrackRecord">Track Record</button>
+  <button class="view-btn" id="viewHintAccuracy">Hint Accuracy</button>
+  <button class="view-btn" id="viewLeagueTable">League Table</button>
 </div>
 <button class="view-btn" id="notifyBtn" style="margin:1rem 1.2rem 0;width:calc(100% - 2.4rem);">🔔 Enable value-bet notifications</button>
 <div class="tabs" id="tabs"></div>
@@ -90,35 +102,44 @@ const contentEl = document.getElementById('content');
 // refresh_meta and predictions, and INSERT-only on push_subscriptions (see
 // DEPLOY.md for the exact policies). It can never read or change anything
 // else in your database.
-const SUPABASE_URL = 'https://wcblrwjcxtayczsptpuh.supabase.co/rest/v1/';
-const SUPABASE_ANON_KEY = 'sb_publishable_UZ5Q4Jsa-mRO44kHzYob-A_Duuv-O-u';
+const SUPABASE_URL = 'https://YOUR-PROJECT-REF.supabase.co';
+const SUPABASE_ANON_KEY = 'YOUR-ANON-PUBLIC-KEY';
 const sb = (SUPABASE_URL.includes('YOUR-PROJECT-REF') || !window.supabase)
   ? null
   : window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
-let view = 'fixtures'; // 'fixtures' | 'parlay' | 'trackrecord'
+let view = 'fixtures'; // 'fixtures' | 'parlay' | 'trackrecord' | 'hintaccuracy' | 'leaguetable'
 const viewFixturesBtn = document.getElementById('viewFixtures');
 const viewParlayBtn = document.getElementById('viewParlay');
 const viewTrackRecordBtn = document.getElementById('viewTrackRecord');
+const viewHintAccuracyBtn = document.getElementById('viewHintAccuracy');
+const viewLeagueTableBtn = document.getElementById('viewLeagueTable');
 
 function setView(v){
   view = v;
   viewFixturesBtn.classList.toggle('active', v === 'fixtures');
   viewParlayBtn.classList.toggle('active', v === 'parlay');
   viewTrackRecordBtn.classList.toggle('active', v === 'trackrecord');
-  // League tabs pick a single league for Fixtures/Track Record — Parlay
-  // Builder spans every league at once, so there's nothing for them to do.
+  viewHintAccuracyBtn.classList.toggle('active', v === 'hintaccuracy');
+  viewLeagueTableBtn.classList.toggle('active', v === 'leaguetable');
+  // League tabs pick a single league for Fixtures/Track Record/Hint
+  // Accuracy/League Table — Parlay Builder spans every league at once, so
+  // there's nothing for them to do there.
   tabsEl.style.display = v === 'parlay' ? 'none' : 'flex';
   loadActive();
 }
 viewFixturesBtn.onclick = () => setView('fixtures');
 viewParlayBtn.onclick = () => setView('parlay');
 viewTrackRecordBtn.onclick = () => setView('trackrecord');
+viewHintAccuracyBtn.onclick = () => setView('hintaccuracy');
+viewLeagueTableBtn.onclick = () => setView('leaguetable');
 
 function loadActive(){
   if(view === 'fixtures') loadLeague(active);
   else if(view === 'parlay') loadParlayBoard();
-  else loadTrackRecord(active);
+  else if(view === 'trackrecord') loadTrackRecord(active);
+  else if(view === 'hintaccuracy') loadHintAccuracy(active);
+  else loadLeagueTable(active);
 }
 
 function renderTabs(){
@@ -205,6 +226,141 @@ function summarizeTrackRecord(rows){
     value_bets_placed: betsPlaced,
     value_bets_profit_units: Math.round(stakedProfit * 100) / 100,
   };
+}
+
+async function loadHintAccuracy(name){
+  if(!sb){ noSupabaseConfigured(); return; }
+  contentEl.innerHTML = '<div class="status">Loading...</div>';
+  try{
+    // Same resolved-fixtures pool as Track Record, filtered down to rows
+    // where a hint actually fired — mirrors db.get_hint_track_record().
+    const { data, error } = await sb.from('predictions').select('*')
+      .eq('league', name).eq('resolved', true).not('hint_market', 'is', null)
+      .order('match_date', { ascending: false }).limit(100);
+    if(error) throw error;
+    renderHintAccuracy(summarizeHintTrackRecord(data || []), data || []);
+  }catch(err){
+    contentEl.innerHTML = `<div class="status">Couldn't load hint accuracy: ${err.message}</div>`;
+  }
+}
+
+// Mirrors db._hint_hit() / db.summarize_hint_track_record() in db.py — see
+// that file's docstrings for why this grades the actual "what to play" tip
+// (per-market, since Win-or-Draw naturally hits more often than Straight
+// Win) rather than summarizeTrackRecord()'s single-highest-probability
+// check above.
+function hintHit(hintSide, actual, bttsActual){
+  if(hintSide === 'Home') return actual === 'Home';
+  if(hintSide === 'Away') return actual === 'Away';
+  if(hintSide === 'HomeOrDraw') return actual === 'Home' || actual === 'Draw';
+  if(hintSide === 'AwayOrDraw') return actual === 'Away' || actual === 'Draw';
+  if(hintSide === 'BTTS_YES') return bttsActual;
+  if(hintSide === 'BTTS_NO') return !bttsActual;
+  return null; // ungraded (e.g. a row recorded before hint_side existed)
+}
+
+function summarizeHintTrackRecord(rows){
+  const byMarket = {};
+  let overallHits = 0, graded = 0;
+  for(const r of rows){
+    const actual = r.actual_home_goals > r.actual_away_goals ? 'Home'
+      : (r.actual_away_goals > r.actual_home_goals ? 'Away' : 'Draw');
+    const bttsActual = r.actual_home_goals > 0 && r.actual_away_goals > 0;
+    const hit = hintHit(r.hint_side, actual, bttsActual);
+    if(hit === null) continue;
+    graded++;
+    if(hit) overallHits++;
+    const m = byMarket[r.hint_market] || (byMarket[r.hint_market] = { correct: 0, total: 0 });
+    m.total++;
+    if(hit) m.correct++;
+  }
+  const by_market = {};
+  for(const market in byMarket){
+    const m = byMarket[market];
+    by_market[market] = { count: m.total, accuracy: Math.round((m.correct / m.total) * 1000) / 1000 };
+  }
+  return {
+    count: graded,
+    accuracy: graded ? Math.round((overallHits / graded) * 1000) / 1000 : null,
+    by_market,
+  };
+}
+
+function renderHintAccuracy(summary, history){
+  if(!summary || !summary.count){
+    contentEl.innerHTML = '<div class="status">No resolved fixtures with a hint yet for this league. Check back once a matchday has been played.</div>';
+    return;
+  }
+  const marketCardsHtml = Object.entries(summary.by_market).map(([market, m]) => `
+    <div class="stat"><div class="num">${(m.accuracy*100).toFixed(0)}%</div><div class="lbl">${market} (${m.count})</div></div>
+  `).join('');
+  const summaryHtml = `
+    <div class="summary-row">
+      <div class="stat"><div class="num">${(summary.accuracy*100).toFixed(0)}%</div><div class="lbl">Overall hint hit rate</div></div>
+      ${marketCardsHtml}
+    </div>
+    <div class="parlay-note">
+      Grades the actual "what to play" tip shown at the time (Straight Win / Win or Draw / BTTS), not just
+      whichever outcome had the single highest probability — see the per-market breakdown above, since Win
+      or Draw covers more outcomes than Straight Win and should naturally hit more often; that's not the
+      model performing better on that market, just a wider bet.
+    </div>`;
+  const rowsHtml = history.map(r => {
+    const actual = r.actual_home_goals > r.actual_away_goals ? 'Home' : (r.actual_away_goals > r.actual_home_goals ? 'Away' : 'Draw');
+    const bttsActual = r.actual_home_goals > 0 && r.actual_away_goals > 0;
+    const hit = hintHit(r.hint_side, actual, bttsActual);
+    return `
+    <div class="tr-row">
+      <div class="tr-fixture">${r.home} ${r.actual_home_goals}-${r.actual_away_goals} ${r.away}
+        <div class="tr-result">Played: ${r.hint_market} — ${r.hint_selection} (${(r.hint_confidence*100).toFixed(0)}%)</div>
+      </div>
+      <div class="${hit ? 'tr-hit' : 'tr-miss'}">${hit === null ? '—' : (hit ? '✓' : '✕')}</div>
+    </div>`;
+  }).join('');
+  contentEl.innerHTML = summaryHtml + '<div class="fixture">' + rowsHtml + '</div>';
+}
+
+async function loadLeagueTable(name){
+  if(!sb){ noSupabaseConfigured(); return; }
+  if(name === 'Champions League'){
+    contentEl.innerHTML = '<div class="status">Champions League doesn\'t have a single league table (it\'s split into group/league-phase standings) — not shown here.</div>';
+    return;
+  }
+  contentEl.innerHTML = '<div class="status">Loading...</div>';
+  try{
+    const { data, error } = await sb.from('standings').select('*')
+      .eq('league', name).order('position', { ascending: true });
+    if(error) throw error;
+    renderLeagueTable(data || []);
+  }catch(err){
+    contentEl.innerHTML = `<div class="status">Couldn't load the league table: ${err.message}</div>`;
+  }
+}
+
+function renderLeagueTable(rows){
+  if(!rows.length){
+    contentEl.innerHTML = '<div class="status">No table data cached yet for this league. Check back after the next refresh.</div>';
+    return;
+  }
+  const rowsHtml = rows.map(r => `
+    <tr>
+      <td class="lt-pos">${r.position}</td>
+      <td><div class="lt-team">${crestImg(r.crest, r.team)}${r.team}</div></td>
+      <td class="lt-num">${r.played}</td>
+      <td class="lt-num">${r.won}</td>
+      <td class="lt-num">${r.drawn}</td>
+      <td class="lt-num">${r.lost}</td>
+      <td class="lt-num">${r.goal_difference > 0 ? '+' : ''}${r.goal_difference}</td>
+      <td class="lt-pts">${r.points}</td>
+    </tr>`).join('');
+  contentEl.innerHTML = `
+    <table class="league-table">
+      <thead><tr>
+        <th></th><th>Team</th><th class="lt-num">P</th><th class="lt-num">W</th>
+        <th class="lt-num">D</th><th class="lt-num">L</th><th class="lt-num">GD</th><th class="lt-num">Pts</th>
+      </tr></thead>
+      <tbody>${rowsHtml}</tbody>
+    </table>`;
 }
 
 async function loadParlayBoard(){

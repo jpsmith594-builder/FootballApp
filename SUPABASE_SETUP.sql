@@ -38,6 +38,13 @@ alter table push_subscriptions enable row level security;
 create policy "push_subscriptions_public_insert" on push_subscriptions
   for insert with check (true);
 
+-- Public, read-only: the current league table (all leagues except
+-- Champions League, which uses a different group-stage shape — see
+-- engine.STANDINGS_SKIP_LEAGUES).
+alter table standings enable row level security;
+create policy "standings_public_read" on standings
+  for select using (true);
+
 -- team_adjustments: deliberately NOT given any policy below, so with RLS
 -- enabled and no policies, the anon/authenticated API roles get zero
 -- access — admin-only, as before, still reachable only via the
