@@ -133,22 +133,37 @@ _cache: dict = {}
 STANDINGS_SKIP_LEAGUES = {"Champions League"}
 
 
+def refresh_standings(league_name: str):
+    """Fetches and caches just the league table for one league. Split out
+    from refresh_league() on purpose — a table only changes after matches
+    actually finish (once or twice a week), not hourly, so it runs on its
+    own much lighter schedule (see refresh_standings.py and
+    .github/workflows/refresh_standings.yml) instead of burning GitHub
+    Actions minutes on every single predictions refresh. No-ops for
+    competitions in STANDINGS_SKIP_LEAGUES."""
+    if league_name in STANDINGS_SKIP_LEAGUES:
+        return
+    league_code = LEAGUES[league_name]
+    try:
+        client = FootballDataClient()
+        table_rows = client.get_standings(league_code)
+        db.replace_standings(league_name, table_rows)
+        log.info(f"{league_name}: standings refreshed ({len(table_rows)} teams)")
+    except Exception as e:
+        log.warning(f"Could not refresh standings for {league_name}: {e}")
+
+
+def refresh_all_standings():
+    for name in LEAGUES:
+        refresh_standings(name)
+
+
 def refresh_league(league_name: str):
     league_code = LEAGUES[league_name]
     log.info(f"Refreshing {league_name}...")
     try:
         client = FootballDataClient()
         results = client.get_results(league_code, days_back=RESULTS_DAYS_BACK)
-
-        # Pure display data — never feeds the model — so it's fetched and
-        # written independently, with its own try/except: a standings hiccup
-        # should never block predictions from refreshing.
-        if league_name not in STANDINGS_SKIP_LEAGUES:
-            try:
-                table_rows = client.get_standings(league_code)
-                db.replace_standings(league_name, table_rows)
-            except Exception as e:
-                log.warning(f"Could not refresh standings for {league_name}: {e}")
         model = DixonColesModel()
         model.fit(results)
         # Teams with a thin sample (newly promoted sides, mainly) get pulled

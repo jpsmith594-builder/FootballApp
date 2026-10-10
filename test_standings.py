@@ -9,6 +9,7 @@ os.environ["DATABASE_URL"] = "sqlite:///:memory:"
 
 import db  # noqa: E402
 from data_fetcher import FootballDataClient  # noqa: E402
+import engine  # noqa: E402
 
 
 def _fake_standings_response(entries):
@@ -95,3 +96,27 @@ def test_replace_standings_fully_replaces_stale_rows():
 
 def test_get_standings_unknown_league_returns_empty():
     assert db.get_standings("NeverRefreshedLeague") == []
+
+
+def test_refresh_standings_skips_champions_league(monkeypatch):
+    # Champions League has no single flat table (group/league-phase shape),
+    # so engine.refresh_standings() must no-op for it WITHOUT ever touching
+    # the network — asserting that by making a real API call blow up if
+    # it's attempted.
+    def _boom(*args, **kwargs):
+        raise AssertionError("should never call the API for Champions League standings")
+    monkeypatch.setattr(engine, "FootballDataClient", lambda: type("C", (), {"get_standings": _boom})())
+    engine.refresh_standings("Champions League")  # should return quietly, no error
+    assert db.get_standings("Champions League") == []
+
+
+def test_refresh_standings_writes_through_for_a_normal_league(monkeypatch):
+    fake_rows = [{"position": 1, "team": "Arsenal", "crest": None, "played": 10, "won": 8,
+                   "drawn": 1, "lost": 1, "goals_for": 20, "goals_against": 8,
+                   "goal_difference": 12, "points": 25}]
+    fake_client = type("C", (), {"get_standings": lambda self, code: fake_rows})()
+    monkeypatch.setattr(engine, "FootballDataClient", lambda: fake_client)
+    engine.refresh_standings("Premier League")
+    stored = db.get_standings("Premier League")
+    assert len(stored) == 1
+    assert stored[0]["team"] == "Arsenal"
