@@ -26,7 +26,7 @@ from datetime import datetime, timezone
 from data_fetcher import FootballDataClient, LEAGUES
 from poisson_model import DixonColesModel, blend_with_market
 from elo_model import EloModel, ensemble as elo_ensemble
-from value_bet import fetch_odds, find_value_bets, devig
+from value_bet import fetch_odds, find_value_bets, devig, OddsQuote
 import calibration
 import db
 import push
@@ -35,6 +35,11 @@ log = logging.getLogger("engine")
 
 RESULTS_DAYS_BACK = int(os.environ.get("RESULTS_DAYS_BACK", "365"))
 ODDS_ENABLED = bool(os.environ.get("ODDS_API_KEY"))
+# A league's bookmaker odds are re-fetched at most this often; in between,
+# the stored copy is reused (see get_odds_by_fixture). 20h rather than 24h so
+# a once-a-day fetch doesn't drift later each day against the 6-hourly runs.
+# Free-tier budget: ~1 credit x 10 leagues x 30 days = ~300/month.
+ODDS_MAX_AGE_HOURS = float(os.environ.get("ODDS_MAX_AGE_HOURS", "20"))
 # How much trust goes to Dixon-Coles vs Elo when forming "the model's view"
 # (used for value-bet detection, before any market blending happens).
 ENSEMBLE_WEIGHT_DC = float(os.environ.get("ENSEMBLE_WEIGHT_DC", "0.7"))
@@ -133,6 +138,45 @@ _cache: dict = {}
 STANDINGS_SKIP_LEAGUES = {"Champions League"}
 
 
+def get_odds_by_fixture(league_name: str, has_fixtures: bool = True) -> dict:
+    """
+    Returns {(home, away): OddsQuote} for one league, spending Odds API
+    credits as sparingly as possible:
+      - no upcoming fixtures -> no call at all;
+      - a stored copy younger than ODDS_MAX_AGE_HOURS -> reused as-is, no call;
+      - otherwise fetch fresh, store it (db.replace_odds_cache), use it;
+      - if that fetch fails (quota exhausted, outage), fall back to the
+        stale stored copy rather than dropping value bets entirely.
+    Because the stored copy is reused between fetches, every refresh still
+    has odds to blend with and detect value bets against — the 6-hourly
+    runs just don't each pay for them.
+    """
+    if not ODDS_ENABLED or not has_fixtures:
+        return {}
+    cached, fetched_at = db.get_odds_cache(league_name)
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    is_fresh = fetched_at is not None and (now - fetched_at).total_seconds() < ODDS_MAX_AGE_HOURS * 3600
+    quote_dicts = cached
+    if not is_fresh:
+        try:
+            fresh = fetch_odds(league_name)
+            quote_dicts = [
+                {"home_team": q.home_team, "away_team": q.away_team, "home_odds": q.home_odds,
+                 "draw_odds": q.draw_odds, "away_odds": q.away_odds, "bookmaker": q.bookmaker}
+                for q in fresh
+            ]
+            db.replace_odds_cache(league_name, quote_dicts)
+        except Exception as e:
+            log.warning(f"Odds fetch failed for {league_name} (using stored copy, "
+                        f"{len(cached)} quotes): {e}")
+    return {
+        (q["home_team"], q["away_team"]): OddsQuote(
+            home_team=q["home_team"], away_team=q["away_team"], home_odds=q["home_odds"],
+            draw_odds=q["draw_odds"], away_odds=q["away_odds"], bookmaker=q.get("bookmaker") or "")
+        for q in quote_dicts
+    }
+
+
 def refresh_standings(league_name: str):
     """Fetches and caches just the league table for one league. Split out
     from refresh_league() on purpose — a table only changes after matches
@@ -181,13 +225,7 @@ def refresh_league(league_name: str):
         # not value-bet detection or the track record.
         correction_fn = calibration.build_correction(league_name)
 
-        odds_by_fixture = {}
-        if ODDS_ENABLED:
-            try:
-                quotes = fetch_odds(league_name)
-                odds_by_fixture = {(q.home_team, q.away_team): q for q in quotes}
-            except Exception as e:
-                log.warning(f"Odds fetch failed for {league_name}: {e}")
+        odds_by_fixture = get_odds_by_fixture(league_name, has_fixtures=bool(fixtures))
 
         predictions = []
         for fx in fixtures:

@@ -14,12 +14,20 @@ OddsQuote shape below.
 """
 
 import os
+import logging
 import requests
 from dataclasses import dataclass
 from typing import List, Optional
 
+log = logging.getLogger("value_bet")
+
 ODDS_API_KEY = os.environ.get("ODDS_API_KEY", "")
 ODDS_BASE_URL = "https://api.the-odds-api.com/v4"
+# Each odds call costs (number of markets) x (number of regions) credits, so
+# every extra region multiplies the bill — this used to be "uk,eu" (2 credits
+# per call). One region is plenty for a de-vigged probability comparison.
+# Override with e.g. ODDS_REGIONS="uk,eu" if you ever want more bookmakers.
+ODDS_REGIONS = os.environ.get("ODDS_REGIONS", "uk")
 
 # The Odds API sport keys. The first five are well-established and stable.
 # The last five are best-effort — The Odds API doesn't cover every league on
@@ -58,10 +66,14 @@ def fetch_odds(league: str, api_key: str = ODDS_API_KEY) -> List[OddsQuote]:
     sport_key = ODDS_SPORT_KEYS[league]
     resp = requests.get(
         f"{ODDS_BASE_URL}/sports/{sport_key}/odds",
-        params={"apiKey": api_key, "regions": "uk,eu", "markets": "h2h", "oddsFormat": "decimal"},
+        params={"apiKey": api_key, "regions": ODDS_REGIONS, "markets": "h2h", "oddsFormat": "decimal"},
         timeout=15,
     )
     resp.raise_for_status()
+    # Surfaces the remaining monthly credits in the GitHub Actions log, so
+    # running low is visible before it turns into silent odds failures.
+    log.info(f"Odds API {league}: cost {resp.headers.get('x-requests-last', '?')} credit(s), "
+             f"{resp.headers.get('x-requests-remaining', '?')} remaining this period")
     quotes = []
     for event in resp.json():
         if not event.get("bookmakers"):

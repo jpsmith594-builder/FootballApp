@@ -45,6 +45,13 @@ alter table standings enable row level security;
 create policy "standings_public_read" on standings
   for select using (true);
 
+-- Admin-only: the stored copy of bookmaker odds (see engine.get_odds_by_fixture).
+-- RLS on with NO policies, same as team_adjustments: the frontend never needs
+-- these, and without this the anon key could read them straight off the API.
+-- Run this after the first refresh creates the tables.
+alter table odds_cache enable row level security;
+alter table odds_fetch_meta enable row level security;
+
 -- team_adjustments: deliberately NOT given any policy below, so with RLS
 -- enabled and no policies, the anon/authenticated API roles get zero
 -- access — admin-only, as before, still reachable only via the

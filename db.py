@@ -151,6 +151,32 @@ standings = Table(
     Column("updated_at", DateTime),
 )
 
+# Last-fetched bookmaker odds, per league. The Odds API's free tier is
+# credit-limited, so engine.py only re-fetches a league's odds when this
+# copy is older than ODDS_MAX_AGE_HOURS and otherwise reuses it — which
+# also keeps value bets and the market blend present on the runs in
+# between (the cached_fixtures table is fully rewritten every refresh, so
+# without a stored copy those runs would silently lose them).
+# odds_fetch_meta records WHEN each league was last fetched, separately,
+# so a league with no upcoming events (zero rows) still counts as fetched.
+odds_cache = Table(
+    "odds_cache", metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("league", String, nullable=False),
+    Column("home_team", String, nullable=False),
+    Column("away_team", String, nullable=False),
+    Column("home_odds", Float),
+    Column("draw_odds", Float),
+    Column("away_odds", Float),
+    Column("bookmaker", String, nullable=True),
+)
+
+odds_fetch_meta = Table(
+    "odds_fetch_meta", metadata,
+    Column("league", String, primary_key=True),
+    Column("fetched_at", DateTime),  # naive UTC
+)
+
 metadata.create_all(engine)
 
 
@@ -194,6 +220,43 @@ def replace_cached_fixtures(league: str, predictions: list, fitted_at: str):
             conn.execute(insert(refresh_meta).values(
                 league=league, fitted_at=fitted_at_dt, fixture_count=len(predictions)
             ))
+
+
+def replace_odds_cache(league: str, quotes: list):
+    """quotes: list of dicts with home_team/away_team/home_odds/draw_odds/
+    away_odds/bookmaker. Wholesale replace, and stamps the fetch time even
+    when `quotes` is empty."""
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    with engine.begin() as conn:
+        conn.execute(delete(odds_cache).where(odds_cache.c.league == league))
+        if quotes:
+            conn.execute(insert(odds_cache), [
+                {"league": league, "home_team": q["home_team"], "away_team": q["away_team"],
+                 "home_odds": q["home_odds"], "draw_odds": q["draw_odds"],
+                 "away_odds": q["away_odds"], "bookmaker": q.get("bookmaker")}
+                for q in quotes
+            ])
+        exists = conn.execute(
+            select(odds_fetch_meta.c.league).where(odds_fetch_meta.c.league == league)
+        ).first()
+        if exists:
+            conn.execute(update(odds_fetch_meta).where(odds_fetch_meta.c.league == league)
+                         .values(fetched_at=now))
+        else:
+            conn.execute(insert(odds_fetch_meta).values(league=league, fetched_at=now))
+
+
+def get_odds_cache(league: str):
+    """Returns (quotes, fetched_at): quotes as a list of dicts, fetched_at as
+    a naive-UTC datetime or None if this league's odds were never fetched."""
+    with engine.begin() as conn:
+        rows = conn.execute(
+            select(odds_cache).where(odds_cache.c.league == league)
+        ).mappings().all()
+        meta = conn.execute(
+            select(odds_fetch_meta.c.fetched_at).where(odds_fetch_meta.c.league == league)
+        ).first()
+    return [dict(r) for r in rows], (meta[0] if meta else None)
 
 
 def replace_standings(league: str, rows: list):
