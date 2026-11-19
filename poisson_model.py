@@ -7,8 +7,16 @@ between home and away (a team can be devastating at home and mediocre on
 the road). A single combined rating averages that away; splitting it lets
 the model actually use the difference.
 
-    lam_home = exp(attack_home[home_team] + defense_away[away_team])
-    lam_away = exp(attack_away[away_team] + defense_home[home_team])
+    lam_home = exp(mu_home + attack_home[home_team] + defense_away[away_team])
+    lam_away = exp(mu_away + attack_away[away_team] + defense_home[home_team])
+
+mu_home / mu_away are league-wide baselines (log of the goals an average team
+scores at home / away). They are what lets the model know that a league
+averages ~2.7 goals a game and that home sides score more. Team ratings are
+constrained to average zero, so WITHOUT these two numbers an average match is
+forced to 1.0 goals each side: no scoring level, no home advantage. That
+biased every goal-based market (BTTS, Over 2.5, the most-likely scoreline)
+and was the main weakness found when the live track record was reviewed.
 
 Still uses the Dixon-Coles low-score correlation adjustment and exponential
 time-decay weighting from before.
@@ -36,6 +44,7 @@ away from that prior as they accumulate. A team not present in `priors`
 import numpy as np
 from scipy.optimize import minimize
 from scipy.stats import poisson
+from scipy.special import gammaln
 from dataclasses import dataclass
 from datetime import datetime
 from typing import List, Dict, Tuple
@@ -57,6 +66,9 @@ class DixonColesModel:
         self.teams: List[str] = []
         self.ratings: Dict[str, TeamRating] = {}
         self.rho: float = -0.05
+        # League-wide baseline log goal rates (see module docstring). Set by fit().
+        self.mu_home: float = 0.0
+        self.mu_away: float = 0.0
 
     # ---- fitting ----
 
@@ -98,38 +110,53 @@ class DixonColesModel:
                 prior_ah[i], prior_dh[i] = p.attack_home, p.defense_home
                 prior_aa[i], prior_da[i] = p.attack_away, p.defense_away
 
-        # Parameter vector: [attack_home(n), defense_home(n), attack_away(n), defense_away(n), rho]
+        # Parameter vector:
+        #   [mu_home, mu_away, attack_home(n), defense_home(n), attack_away(n), defense_away(n), rho]
         # Splitting home/away doubles the parameter count versus a single
         # combined rating, so the L2 regularization weight is a bit higher
         # here to keep teams with thin data (e.g. newly promoted sides, or
         # anyone in a short competition like the Champions League group
-        # stage) from swinging to extreme, overfit values. Starting the
-        # optimizer at the priors (rather than always at zero) also helps
-        # it converge faster when most teams already have a sensible
-        # starting point from their domestic rating.
-        n_params = 4 * n
-        x0 = np.concatenate([prior_ah, prior_dh, prior_aa, prior_da, [-0.05]])
+        # stage) from swinging to extreme, overfit values. mu_home/mu_away are
+        # deliberately NOT regularized — they are league-wide levels pinned
+        # down by every match, not per-team quantities that can overfit.
+        # Starting the optimizer at the priors (rather than always at zero)
+        # also helps it converge faster when most teams already have a
+        # sensible starting point from their domestic rating.
+        hi = np.array([idx[m.home] for m in played])
+        ai = np.array([idx[m.away] for m in played])
+        hg = np.array([m.home_goals for m in played], dtype=float)
+        ag = np.array([m.away_goals for m in played], dtype=float)
+        mu_h0 = float(np.log(max(np.sum(weights * hg) / weights.sum(), 0.2)))
+        mu_a0 = float(np.log(max(np.sum(weights * ag) / weights.sum(), 0.2)))
+        x0 = np.concatenate([[mu_h0, mu_a0], prior_ah, prior_dh, prior_aa, prior_da, [-0.05]])
+
+        # Everything below is vectorized over matches (the old version looped
+        # over every match in Python on every optimizer step, which made a
+        # single league fit take about a minute; this takes a fraction of a second).
+        log_fact_h, log_fact_a = gammaln(hg + 1), gammaln(ag + 1)
+        is00 = (hg == 0) & (ag == 0)
+        is01 = (hg == 0) & (ag == 1)
+        is10 = (hg == 1) & (ag == 0)
+        is11 = (hg == 1) & (ag == 1)
 
         def unpack(x):
-            ah = x[0:n]
-            dh = x[n:2*n]
-            aa = x[2*n:3*n]
-            da = x[3*n:4*n]
-            rho = x[4*n]
-            return ah, dh, aa, da, rho
+            return (x[0], x[1], x[2:2 + n], x[2 + n:2 + 2 * n],
+                    x[2 + 2 * n:2 + 3 * n], x[2 + 3 * n:2 + 4 * n], x[2 + 4 * n])
 
         def neg_log_likelihood(x):
-            ah, dh, aa, da, rho = unpack(x)
-            ll = 0.0
-            for w, m in zip(weights, played):
-                hi, ai = idx[m.home], idx[m.away]
-                lam_home = np.exp(ah[hi] + da[ai])
-                lam_away = np.exp(aa[ai] + dh[hi])
-                p_home = poisson.pmf(m.home_goals, lam_home)
-                p_away = poisson.pmf(m.away_goals, lam_away)
-                tau = self._tau(m.home_goals, m.away_goals, lam_home, lam_away, rho)
-                p = max(p_home * p_away * tau, 1e-10)
-                ll += w * np.log(p)
+            mu_h, mu_a, ah, dh, aa, da, rho = unpack(x)
+            log_lh = mu_h + ah[hi] + da[ai]
+            log_la = mu_a + aa[ai] + dh[hi]
+            lh, la = np.exp(log_lh), np.exp(log_la)
+            # Dixon-Coles low-score correction (same _tau rule, vectorized).
+            tau = np.ones_like(lh)
+            tau = np.where(is00, 1 - lh * la * rho, tau)
+            tau = np.where(is01, 1 + lh * rho, tau)
+            tau = np.where(is10, 1 + la * rho, tau)
+            tau = np.where(is11, 1 - rho, tau)
+            ll_each = ((hg * log_lh - lh - log_fact_h) + (ag * log_la - la - log_fact_a)
+                       + np.log(np.maximum(tau, 1e-10)))
+            ll = np.sum(weights * ll_each)
             reg = (prior_weight * np.sum((ah - prior_ah) ** 2)
                    + prior_weight * np.sum((dh - prior_dh) ** 2)
                    + prior_weight * np.sum((aa - prior_aa) ** 2)
@@ -137,15 +164,16 @@ class DixonColesModel:
             return -ll + reg
 
         constraints = [
-            {"type": "eq", "fun": lambda x: np.sum(x[0:n])},
-            {"type": "eq", "fun": lambda x: np.sum(x[n:2*n])},
-            {"type": "eq", "fun": lambda x: np.sum(x[2*n:3*n])},
-            {"type": "eq", "fun": lambda x: np.sum(x[3*n:4*n])},
+            {"type": "eq", "fun": lambda x: np.sum(x[2:2 + n])},
+            {"type": "eq", "fun": lambda x: np.sum(x[2 + n:2 + 2 * n])},
+            {"type": "eq", "fun": lambda x: np.sum(x[2 + 2 * n:2 + 3 * n])},
+            {"type": "eq", "fun": lambda x: np.sum(x[2 + 3 * n:2 + 4 * n])},
         ]
         result = minimize(neg_log_likelihood, x0, constraints=constraints, method="SLSQP",
                            options={"maxiter": 300, "ftol": 1e-6})
 
-        ah, dh, aa, da, rho = unpack(result.x)
+        mu_h, mu_a, ah, dh, aa, da, rho = unpack(result.x)
+        self.mu_home, self.mu_away = float(mu_h), float(mu_a)
         self.rho = float(rho)
         for t in self.teams:
             i = idx[t]
@@ -219,8 +247,8 @@ class DixonColesModel:
         if home not in self.ratings or away not in self.ratings:
             raise ValueError(f"No rating for {home} or {away} — team not in fitted data")
         h, a = self.ratings[home], self.ratings[away]
-        lam_home = np.exp(h.attack_home + a.defense_away)
-        lam_away = np.exp(a.attack_away + h.defense_home)
+        lam_home = np.exp(self.mu_home + h.attack_home + a.defense_away)
+        lam_away = np.exp(self.mu_away + a.attack_away + h.defense_home)
         return float(lam_home), float(lam_away)
 
     def predict(self, home: str, away: str, max_goals: int = 8,

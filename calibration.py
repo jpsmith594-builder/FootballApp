@@ -65,8 +65,18 @@ def build_correction(league: str = None):
     """
     if not CALIBRATION_ENABLED:
         return None
-    curve = db.get_calibration_curve(league=league, bucket_size=0.1,
-                                      min_per_bucket=CALIBRATION_MIN_PER_BUCKET)
+    # Only rows written by the model generation currently running count (the
+    # default of get_calibration_curve): a correction learned from an older,
+    # differently-biased model would be wrong for this one. And a failure here
+    # (e.g. a database hiccup) must never stop a league's predictions from
+    # refreshing — no correction is safe, a crashed refresh is not.
+    try:
+        curve = db.get_calibration_curve(league=league, bucket_size=0.1,
+                                          min_per_bucket=CALIBRATION_MIN_PER_BUCKET,
+                                          model_version=db.CURRENT_MODEL_VERSION)
+    except Exception as e:
+        log.warning(f"Calibration skipped for {league}: {e}")
+        return None
     if curve["total_resolved_predictions"] < CALIBRATION_MIN_SAMPLES or not curve["buckets"]:
         return None
 

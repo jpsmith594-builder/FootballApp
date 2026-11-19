@@ -27,8 +27,17 @@ create policy "refresh_meta_public_read" on refresh_meta
 -- live in the same table but the frontend's own query already filters to
 -- resolved = true; RLS just backstops that at the database level too.)
 alter table predictions enable row level security;
+-- Safe to re-run: the app now adds missing columns itself at startup, but this
+-- makes sure the column exists before the policy below refers to it.
+alter table predictions add column if not exists model_version integer;
+-- Only rows written by the current model generation (model_version >= 2) are
+-- public, so the Track Record and Hint Accuracy tabs judge the model that is
+-- actually running now. Older rows (NULL / 1, from before the baseline
+-- goal-rate fix) stay in the table for your own comparison but are hidden from
+-- the app. To show everything again, change the condition to `resolved = true`.
+drop policy if exists "predictions_public_read_resolved_only" on predictions;
 create policy "predictions_public_read_resolved_only" on predictions
-  for select using (resolved = true);
+  for select using (resolved = true and model_version >= 2);
 
 -- Public, INSERT-ONLY: a visitor can register their own browser for push
 -- notifications, but can never read back the list of subscriptions (which

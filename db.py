@@ -18,11 +18,24 @@ machine, not fine for the deployed app.
 """
 
 import os
+import logging
 from datetime import datetime, timezone
 from sqlalchemy import (
-    create_engine, MetaData, Table, Column, Integer, String, Float, Boolean,
+    create_engine, inspect, text, MetaData, Table, Column, Integer, String, Float, Boolean,
     DateTime, JSON, select, and_, insert, update, delete,
 )
+
+log = logging.getLogger("db")
+
+# Which generation of the prediction model wrote a track-record row. Bump this
+# whenever a change alters what the model predicts (not for UI/infra changes),
+# so accuracy and calibration are only ever judged against rows produced by the
+# model currently running — older rows stay in the table for comparison but are
+# never mixed in. Rows written before versioning existed have model_version
+# NULL and count as version 1.
+#   1: original Dixon-Coles (no league baseline / home-advantage term)
+#   2: Dixon-Coles with league-wide baseline goal rates (mu_home / mu_away)
+CURRENT_MODEL_VERSION = 2
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "sqlite:///matchday_local.db")
 # Some providers (including Render's own Postgres, and some Supabase
@@ -88,6 +101,8 @@ predictions = Table(
     Column("actual_away_goals", Integer, nullable=True),
     Column("resolved", Boolean, default=False),
     Column("recorded_at", DateTime),
+    # See CURRENT_MODEL_VERSION above. NULL = written before versioning (v1).
+    Column("model_version", Integer, nullable=True),
 )
 
 # --- Fast-read cache for the frontend ---
@@ -178,6 +193,45 @@ odds_fetch_meta = Table(
 )
 
 metadata.create_all(engine)
+
+
+def add_missing_columns(eng=None):
+    """metadata.create_all() only creates tables that don't exist yet — it never
+    adds a new column to a table that already does. That bit us once already
+    (the Hint Accuracy tab erroring on `predictions.hint_market` because the
+    live table predates it), so this closes the gap: any column declared above
+    but missing from the live table is added with ALTER TABLE, at startup, on
+    every run. Nullable columns only — adding a NOT NULL column to a table with
+    existing rows can't be done safely automatically. Failures are logged and
+    skipped, never fatal."""
+    eng = eng or engine
+    try:
+        insp = inspect(eng)
+        existing_tables = set(insp.get_table_names())
+        for table in metadata.sorted_tables:
+            if table.name not in existing_tables:
+                continue
+            have = {c["name"] for c in insp.get_columns(table.name)}
+            for col in table.columns:
+                if col.name in have:
+                    continue
+                if not col.nullable and not col.primary_key:
+                    log.warning(f"Not auto-adding NOT NULL column {table.name}.{col.name}; add it manually")
+                    continue
+                prep = eng.dialect.identifier_preparer
+                ddl = (f"ALTER TABLE {prep.quote(table.name)} ADD COLUMN "
+                       f"{prep.quote(col.name)} {col.type.compile(dialect=eng.dialect)}")
+                try:
+                    with eng.begin() as conn:
+                        conn.execute(text(ddl))
+                    log.info(f"Added missing column {table.name}.{col.name}")
+                except Exception as e:
+                    log.warning(f"Could not add column {table.name}.{col.name}: {e}")
+    except Exception as e:
+        log.warning(f"Column check skipped: {e}")
+
+
+add_missing_columns()
 
 
 def replace_cached_fixtures(league: str, predictions: list, fitted_at: str):
@@ -308,10 +362,34 @@ def record_prediction(league: str, home: str, away: str, match_date: str, pred: 
     with hindsight as kickoff approaches. Returns True if this call actually
     inserted a new row (used to decide whether to fire a push notification —
     without this check, every 6-hour refresh would re-notify for the same
-    value bet)."""
+    value bet).
+
+    One deliberate exception: when the model itself has been upgraded
+    (CURRENT_MODEL_VERSION went up), a stored row from an OLDER model for a
+    match that hasn't kicked off yet is replaced with the new model's
+    prediction and re-tagged. That uses no hindsight (kickoff hasn't happened),
+    and without it every fixture already on the schedule when the model changed
+    would be graded as the old model, leaving the version-filtered Track Record
+    empty until fixtures first seen after the upgrade have been played. A row
+    for a match that has already started, or that is resolved, is never touched,
+    and an upgrade returns False so it doesn't re-fire push notifications."""
+    values = dict(
+        predicted_home_win=pred["home_win"], predicted_draw=pred["draw"],
+        predicted_away_win=pred["away_win"],
+        predicted_score_home=pred["most_likely_score"][0],
+        predicted_score_away=pred["most_likely_score"][1],
+        value_bet_market=value_bet["market"] if value_bet else None,
+        value_bet_odds=value_bet["odds"] if value_bet else None,
+        value_bet_edge=value_bet["edge"] if value_bet else None,
+        hint_market=hint["market"] if hint else None,
+        hint_selection=hint["selection"] if hint else None,
+        hint_side=hint.get("side") if hint else None,
+        hint_confidence=hint["confidence"] if hint else None,
+        model_version=CURRENT_MODEL_VERSION,
+    )
     with engine.begin() as conn:
         exists = conn.execute(
-            select(predictions.c.id).where(and_(
+            select(predictions.c.id, predictions.c.model_version, predictions.c.resolved).where(and_(
                 predictions.c.league == league,
                 predictions.c.home == home,
                 predictions.c.away == away,
@@ -319,24 +397,27 @@ def record_prediction(league: str, home: str, away: str, match_date: str, pred: 
             ))
         ).first()
         if exists:
+            row_id, row_version, row_resolved = exists
+            if (not row_resolved and (row_version or 1) < CURRENT_MODEL_VERSION
+                    and _kickoff_is_in_future(match_date)):
+                conn.execute(update(predictions).where(predictions.c.id == row_id).values(
+                    **values, recorded_at=datetime.now(timezone.utc)))
             return False
         conn.execute(insert(predictions).values(
             league=league, home=home, away=away, match_date=match_date,
-            predicted_home_win=pred["home_win"], predicted_draw=pred["draw"],
-            predicted_away_win=pred["away_win"],
-            predicted_score_home=pred["most_likely_score"][0],
-            predicted_score_away=pred["most_likely_score"][1],
-            value_bet_market=value_bet["market"] if value_bet else None,
-            value_bet_odds=value_bet["odds"] if value_bet else None,
-            value_bet_edge=value_bet["edge"] if value_bet else None,
-            hint_market=hint["market"] if hint else None,
-            hint_selection=hint["selection"] if hint else None,
-            hint_side=hint.get("side") if hint else None,
-            hint_confidence=hint["confidence"] if hint else None,
-            resolved=False,
-            recorded_at=datetime.now(timezone.utc),
+            **values, resolved=False, recorded_at=datetime.now(timezone.utc),
         ))
         return True
+
+
+def _kickoff_is_in_future(match_date: str) -> bool:
+    try:
+        kickoff = datetime.fromisoformat(match_date.replace("Z", "+00:00"))
+        if kickoff.tzinfo is None:
+            kickoff = kickoff.replace(tzinfo=timezone.utc)
+        return kickoff > datetime.now(timezone.utc)
+    except Exception:
+        return False   # can't tell -> leave the stored row alone
 
 
 def resolve_predictions(league: str, finished_matches: list):
@@ -357,27 +438,37 @@ def resolve_predictions(league: str, finished_matches: list):
             )
 
 
-def get_track_record(league: str, limit: int = 100) -> list:
+def get_track_record(league: str, limit: int = 100,
+                      model_version: int = CURRENT_MODEL_VERSION) -> list:
+    """Resolved predictions for one league, newest first — by default only
+    those written by the model generation currently running (see
+    CURRENT_MODEL_VERSION); pass model_version=None for every version."""
+    query = select(predictions).where(and_(
+        predictions.c.league == league,
+        predictions.c.resolved == True,  # noqa: E712
+    ))
+    query = _filter_model_version(query, model_version)
     with engine.begin() as conn:
         rows = conn.execute(
-            select(predictions).where(and_(
-                predictions.c.league == league,
-                predictions.c.resolved == True,  # noqa: E712
-            )).order_by(predictions.c.match_date.desc()).limit(limit)
+            query.order_by(predictions.c.match_date.desc()).limit(limit)
         ).mappings().all()
     return [dict(r) for r in rows]
 
 
-def get_hint_track_record(league: str, limit: int = 100) -> list:
+def get_hint_track_record(league: str, limit: int = 100,
+                           model_version: int = CURRENT_MODEL_VERSION) -> list:
     """Same resolved-fixtures table as get_track_record(), but only the rows
-    where a hint actually fired — this is what the Hint Accuracy tab reads."""
+    where a hint actually fired — this is what the Hint Accuracy tab reads.
+    Current model generation only by default (see get_track_record)."""
+    query = select(predictions).where(and_(
+        predictions.c.league == league,
+        predictions.c.resolved == True,  # noqa: E712
+        predictions.c.hint_market.isnot(None),
+    ))
+    query = _filter_model_version(query, model_version)
     with engine.begin() as conn:
         rows = conn.execute(
-            select(predictions).where(and_(
-                predictions.c.league == league,
-                predictions.c.resolved == True,  # noqa: E712
-                predictions.c.hint_market.isnot(None),
-            )).order_by(predictions.c.match_date.desc()).limit(limit)
+            query.order_by(predictions.c.match_date.desc()).limit(limit)
         ).mappings().all()
     return [dict(r) for r in rows]
 
@@ -499,21 +590,33 @@ def remove_push_subscription(endpoint: str):
         conn.execute(delete(push_subscriptions).where(push_subscriptions.c.endpoint == endpoint))
 
 
-def get_resolved_predictions_all(league: str = None) -> list:
+def _filter_model_version(query, model_version):
+    if model_version is None:
+        return query
+    if model_version == 1:
+        return query.where((predictions.c.model_version == 1) | (predictions.c.model_version.is_(None)))
+    return query.where(predictions.c.model_version == model_version)
+
+
+def get_resolved_predictions_all(league: str = None, model_version: int = None) -> list:
     """Unlike get_track_record (capped at `limit`, newest-first, meant for
     the UI feed), this returns every resolved prediction with no cap —
     calibration needs the full history to get stable bucket counts, not
-    just the most recent matches."""
+    just the most recent matches. model_version=None returns every version;
+    pass a number to keep only rows written by that model generation
+    (version 1 also matches rows with a NULL version)."""
     with engine.begin() as conn:
         query = select(predictions).where(predictions.c.resolved == True)  # noqa: E712
         if league:
             query = query.where(predictions.c.league == league)
+        query = _filter_model_version(query, model_version)
         rows = conn.execute(query).mappings().all()
     return [dict(r) for r in rows]
 
 
 def get_calibration_curve(league: str = None, bucket_size: float = 0.1,
-                           min_per_bucket: int = 10) -> dict:
+                           min_per_bucket: int = 10,
+                           model_version: int = CURRENT_MODEL_VERSION) -> dict:
     """
     Checks whether the model's stated confidence can actually be trusted:
     among every past prediction where the model gave its top pick, say,
@@ -535,7 +638,10 @@ def get_calibration_curve(league: str = None, bucket_size: float = 0.1,
     track record tab is the natural place to surface it) before deciding
     whether a correction is warranted.
     """
-    rows = get_resolved_predictions_all(league)
+    # Only the current model generation by default: a curve that mixed in rows
+    # from an older, differently-biased model would describe neither model.
+    # Pass model_version=None to include every version.
+    rows = get_resolved_predictions_all(league, model_version=model_version)
     buckets: Dict[float, Dict[str, int]] = {}
     for r in rows:
         hg, ag = r["actual_home_goals"], r["actual_away_goals"]
